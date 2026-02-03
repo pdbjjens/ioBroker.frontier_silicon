@@ -7,6 +7,7 @@
 // The adapter-core module gives you access to the core ioBroker functions
 // you need to create an adapter
 const utils = require('@iobroker/adapter-core');
+//const { all } = require('axios');
 const axios = require('axios').default;
 const xml2js = require('xml2js');
 
@@ -24,6 +25,18 @@ let notifyTimestamp = 0;
 let lastSleepClear = 0;
 let polling = false;
 let sessionRetryCnt = SESSION_RETRYS;
+
+let currentNavNumItems = 0;
+let currentNavNumItemsMax = 0;
+let currentNavIndex = 0;
+let currentNavType = 0;
+let currentNavSubtype = 0;
+let currentNavList = [];
+const currentNavListChunk = 25;
+let allModes = {};
+//let currentNavChunks = []; // neu: Liste von Chunk-Start-Keys (als Strings) für infinite Listen
+//let currentNavChunkIndex = 0; // neu: aktueller Chunk-Index in currentNavChunks
+//let currentNavChunkStart = -1; // neu: Start-Key des aktuellen Chunks
 
 class FrontierSilicon extends utils.Adapter {
     /**
@@ -109,6 +122,13 @@ class FrontierSilicon extends utils.Adapter {
         this.subscribeStates('modes.*.presets.*.recall');
         this.subscribeStates('modes.selected');
         this.subscribeStates('modes.selectPreset');
+        this.subscribeStates('modes.presetUp');
+        this.subscribeStates('modes.presetDown');
+        this.subscribeStates('modes.navigationUp');
+        this.subscribeStates('modes.navigationDown');
+        this.subscribeStates('modes.navigationSelect');
+        this.subscribeStates('modes.navigationBack');
+        this.subscribeStates('modes.navigationSearch');
         this.subscribeStates('audio.mute');
         this.subscribeStates('audio.volume');
         this.subscribeStates('modes.readPresets');
@@ -149,13 +169,15 @@ class FrontierSilicon extends utils.Adapter {
         sleeps.clear();
     }
 
+    /**
     // If you need to react to object changes, uncomment the following block and the corresponding line in the constructor.
     // You also need to subscribe to the objects with `this.subscribeObjects`, similar to `this.subscribeStates`.
     // /**
     //  * Is called if a subscribed object changes
     //  * @param {string} id
     //  * @param {ioBroker.Object | null | undefined} obj
-    //  */
+    //
+    */
     // onObjectChange(id, obj) {
     // 	if (obj) {
     // 		// The object was changed
@@ -188,7 +210,7 @@ class FrontierSilicon extends utils.Adapter {
             // eslint-disable-next-line @typescript-eslint/no-this-alias
             const adapter = this;
 
-            //let result;
+            //let response;
             switch (zustand[2]) {
                 case 'device':
                     switch (zustand[3]) {
@@ -197,8 +219,8 @@ class FrontierSilicon extends utils.Adapter {
                             //const adapter = this;
                             await adapter
                                 .callAPI('netRemote.sys.power', state.val ? '1' : '0')
-                                .then(async function (result) {
-                                    if (result.success) {
+                                .then(async function (response) {
+                                    if (response.success) {
                                         await adapter.setState('device.power', { val: state.val, ack: true });
                                     }
                                 });
@@ -212,8 +234,8 @@ class FrontierSilicon extends utils.Adapter {
 
                             if (state != null && state != undefined && state.val != null && state.val != undefined) {
                                 const name = state.val.toString();
-                                await adapter.callAPI('netRemote.sys.info.friendlyName', name).then(async result => {
-                                    if (result.success) {
+                                await adapter.callAPI('netRemote.sys.info.friendlyName', name).then(async response => {
+                                    if (response.success) {
                                         await adapter.setState('device.friendlyName', {
                                             val: name.toString(),
                                             ack: true,
@@ -226,8 +248,8 @@ class FrontierSilicon extends utils.Adapter {
                             this.log.debug('Daylight Saving Time');
                             await adapter
                                 .callAPI('netRemote.sys.clock.dst', state.val ? '1' : '0')
-                                .then(async function (result) {
-                                    if (result.success) {
+                                .then(async function (response) {
+                                    if (response.success) {
                                         await adapter.setState('device.dayLightSavingTime', {
                                             val: state.val,
                                             ack: true,
@@ -246,14 +268,17 @@ class FrontierSilicon extends utils.Adapter {
                     ) {
                         // frontier_silicon.0.modes.2.switchTo
                         this.log.debug('Modus umschalten');
-                        await adapter.callAPI('netRemote.sys.mode', zustand[3]).then(async function (result) {
-                            if (result.success) {
+                        await adapter.callAPI('netRemote.sys.mode', zustand[3]).then(async function (response) {
+                            if (response.success) {
                                 await adapter.setState('modes.selected', { val: Number(zustand[3]), ack: true });
                                 await adapter.getStateAsync(`modes.${zustand[3]}.label`).then(async function (lab) {
                                     if (lab !== null && lab !== undefined && lab.val !== null) {
                                         await adapter.setState('modes.selectedLabel', { val: lab.val, ack: true });
                                     }
                                 });
+                                await adapter.sleep(3000); // wait for mode change to get current nav list
+                                await adapter.updateNavList();
+
                                 await adapter.setState(`modes.${zustand[3]}.switchTo`, { val: true, ack: true });
                                 //adapter.setState("modes.selectPreset", {val:null, ack: true});
                             }
@@ -265,8 +290,8 @@ class FrontierSilicon extends utils.Adapter {
                         // this.log.debug(`modes.${zustand[3]}.presets.${zustand[5]} activated`);
                         await adapter
                             .callAPI('netRemote.nav.action.selectPreset', zustand[5])
-                            .then(async function (result) {
-                                if (result.success) {
+                            .then(async function (response) {
+                                if (response.success) {
                                     await adapter.setState('modes.selectPreset', {
                                         val: Number(zustand[5]),
                                         ack: true,
@@ -283,17 +308,38 @@ class FrontierSilicon extends utils.Adapter {
                     // frontier_silicon.1.modes.selected
                     else if (zustand[3] === 'selected' && state.val !== null) {
                         this.log.debug('Modus umschalten');
-                        await adapter.callAPI('netRemote.sys.mode', state.val.toString()).then(async function (result) {
-                            if (result.success) {
+                        await adapter.callAPI('netRemote.sys.mode', state.val.toString()).then(async response => {
+                            if (response.success) {
                                 await adapter.setState('modes.selected', { val: Number(state.val), ack: true });
                                 await adapter.getStateAsync(`modes.${state.val}.label`).then(async function (lab) {
                                     if (lab !== null && lab !== undefined && lab.val !== null) {
                                         await adapter.setState('modes.selectedLabel', { val: lab.val, ack: true });
                                     }
                                 });
-                                await adapter.callAPI('netRemote.play.info.graphicUri').then(async function (result) {
+
+                                /*
+                                let deviceReady = false;
+                                while (!deviceReady) {
+                                    adapter.log.debug('Waiting for device to become ready...');
+                                    await adapter.sleep(3000);
+
+                                    await adapter.callAPI('netRemote.nav.status').then(async function (response) {
+                                        if (response.success) {
+                                            adapter.log.debug(`Nav Status: ${response.result.value[0].u8[0]}`);
+                                            if (response.result.value[0].u8[0] == 1) {
+                                                deviceReady = true;
+                                            }
+                                        }
+                                    });
+                                }
+
+*/
+                                await adapter.sleep(3000); // wait for mode change to get current nav list
+                                await this.updateNavList();
+
+                                await adapter.callAPI('netRemote.play.info.graphicUri').then(async function (response) {
                                     await adapter.setState('media.graphic', {
-                                        val: result.result.value[0].c8_array[0].trim(),
+                                        val: response.result.value[0].c8_array[0].trim(),
                                         ack: true,
                                     });
                                 });
@@ -305,14 +351,14 @@ class FrontierSilicon extends utils.Adapter {
                         await this.callAPI('netRemote.nav.state', '1');
                         await adapter
                             .callAPI('netRemote.nav.action.selectPreset', state.val.toString())
-                            .then(async function (result) {
-                                if (result.success) {
+                            .then(async function (response) {
+                                if (response.success) {
                                     await adapter.setState('modes.selectPreset', { val: state.val, ack: true });
                                     await adapter
                                         .callAPI('netRemote.play.info.graphicUri')
-                                        .then(async function (result) {
+                                        .then(async function (response) {
                                             await adapter.setState('media.graphic', {
-                                                val: result.result.value[0].c8_array[0].trim(),
+                                                val: response.result.value[0].c8_array[0].trim(),
                                                 ack: true,
                                             });
                                         });
@@ -321,8 +367,621 @@ class FrontierSilicon extends utils.Adapter {
                     } else if (zustand[3] === 'readPresets') {
                         await this.getAllPresets(true);
                         await adapter.setState(`modes.readPresets`, { val: true, ack: true });
+                    } else if (zustand[3] === 'presetUp') {
+                        let tmpnr;
+                        let currMode;
+                        let len;
+                        await adapter.getStateAsync('modes.selected').then(async currentMode => {
+                            if (currentMode !== null && currentMode !== undefined && currentMode.val !== null) {
+                                currMode = currentMode.val.toString();
+                                await adapter
+                                    .getStateAsync(`modes.${currMode}.presets.available`)
+                                    .then(async available => {
+                                        if (
+                                            available !== null &&
+                                            available !== undefined &&
+                                            available.val !== null &&
+                                            available.val === true
+                                        ) {
+                                            await adapter
+                                                .getStateAsync(`modes.${currMode}.presets.number`)
+                                                .then(async numPres => {
+                                                    if (
+                                                        numPres !== null &&
+                                                        numPres !== undefined &&
+                                                        numPres.val !== null
+                                                    ) {
+                                                        len = numPres.val;
+                                                    }
+                                                });
+                                            await adapter.getStateAsync('modes.selectPreset').then(async selPres => {
+                                                if (selPres === null || selPres === undefined || selPres.val === null) {
+                                                    tmpnr = 0;
+                                                } else {
+                                                    tmpnr = Number(selPres.val);
+                                                    tmpnr++;
+                                                    if (tmpnr == len) {
+                                                        tmpnr = 0;
+                                                    }
+                                                }
+                                            });
+                                            let empty = true;
+                                            while (empty) {
+                                                await adapter
+                                                    .getStateAsync(`modes.${currMode}.presets.${tmpnr.toString()}.name`)
+                                                    .then(async name => {
+                                                        // skip empty preset names
+                                                        if (
+                                                            name === null ||
+                                                            name === undefined ||
+                                                            name.val === null ||
+                                                            name.val === undefined ||
+                                                            name.val === ''
+                                                        ) {
+                                                            tmpnr++;
+                                                            if (tmpnr == len) {
+                                                                tmpnr = 0;
+                                                            }
+                                                        } else {
+                                                            empty = false;
+                                                        }
+                                                    });
+                                            }
+                                        }
+                                    });
+
+                                this.log.debug(`Next Station: ${tmpnr}`);
+                                adapter.setState('modes.selectPreset', { val: tmpnr, ack: false });
+                                adapter.setState(`modes.presetUp`, { val: true, ack: true });
+                            }
+                        });
+                    } else if (zustand[3] === 'presetDown') {
+                        let tmpnr = 0;
+                        let currMode;
+                        let len;
+                        await adapter.getStateAsync('modes.selected').then(async currentMode => {
+                            if (currentMode !== null && currentMode !== undefined && currentMode.val !== null) {
+                                currMode = currentMode.val.toString();
+                                await adapter
+                                    .getStateAsync(`modes.${currMode}.presets.available`)
+                                    .then(async available => {
+                                        if (
+                                            available !== null &&
+                                            available !== undefined &&
+                                            available.val !== null &&
+                                            available.val === true
+                                        ) {
+                                            await adapter
+                                                .getStateAsync(`modes.${currMode}.presets.number`)
+                                                .then(async numPres => {
+                                                    if (
+                                                        numPres !== null &&
+                                                        numPres !== undefined &&
+                                                        numPres.val !== null
+                                                    ) {
+                                                        len = numPres.val;
+                                                    }
+                                                });
+                                            await adapter.getStateAsync('modes.selectPreset').then(async selPres => {
+                                                if (selPres === null || selPres === undefined || selPres.val === null) {
+                                                    tmpnr = 0;
+                                                } else {
+                                                    tmpnr = Number(selPres.val);
+                                                    tmpnr--;
+                                                    if (tmpnr < 0) {
+                                                        tmpnr = len - 1;
+                                                    }
+                                                }
+                                            });
+
+                                            let empty = true;
+                                            while (empty) {
+                                                await adapter
+                                                    .getStateAsync(`modes.${currMode}.presets.${tmpnr.toString()}.name`)
+                                                    .then(async name => {
+                                                        // skip empty preset names
+                                                        if (
+                                                            name === null ||
+                                                            name === undefined ||
+                                                            name.val === null ||
+                                                            name.val === undefined ||
+                                                            name.val === ''
+                                                        ) {
+                                                            tmpnr--;
+                                                            if (tmpnr < 0) {
+                                                                tmpnr = len - 1;
+                                                            }
+                                                        } else {
+                                                            empty = false;
+                                                        }
+                                                    });
+                                            }
+                                        }
+                                    });
+                                this.log.debug(`Previous Station: ${tmpnr}`);
+                                adapter.setState('modes.selectPreset', { val: tmpnr, ack: false });
+                                adapter.setState(`modes.presetDown`, { val: true, ack: true });
+                            }
+                        });
+                    } else if (zustand[3] === 'navigationUp') {
+                        try {
+                            //let currKey = 0;
+                            let nextKey = 0;
+                            /*
+                            const currentKey = await adapter.getStateAsync('modes.currentNavKey');
+                            if (currentKey !== null && currentKey !== undefined && currentKey.val !== null) {
+                                currKey = Number(currentKey.val);
+                                
+                                const obj = await this.getObjectAsync('modes.currentNavKey');
+                                if (obj && obj.native) {
+                                    const currentNavNumItems = obj.native.currentNavNumItems.value;
+                                    const currentNavNumItemsMax = obj.native.currentNavNumItemsMax.value;
+                                    const currentNavIndex = obj.native.currentNavIndex.value;
+                                    const allKeys = Object.values(obj.common.states).map(k => Number(k));
+
+                                    this.log.debug(`All Keys: ${allKeys} Current key ${currKey}`);
+*/
+                            let tmpnr = currentNavIndex;
+                            this.log.debug(
+                                `In navigationUp: Current Index: ${tmpnr} current key: ${currentNavList[tmpnr].$.key} currentNavNumItemsMax: ${currentNavNumItemsMax} currentNavNumItems: ${currentNavNumItems}`,
+                            );
+
+                            tmpnr += 1;
+                            if (currentNavNumItems >= 0) {
+                                // normal list with numItems known
+                                // Check if we need to load more items
+
+                                if (tmpnr >= currentNavList.length) {
+                                    // Wir sind am Ende der aktuellen Liste
+                                    let ceilingItemsMax = Math.ceil(currentNavNumItemsMax / currentNavListChunk);
+                                    let ceilingItems = Math.ceil(currentNavNumItems / currentNavListChunk);
+                                    let remainderItemsMax = currentNavNumItemsMax % currentNavListChunk;
+
+                                    if (ceilingItemsMax < ceilingItems) {
+                                        // Es gibt noch mehr Items zu laden
+                                        const nextChunkStart = ceilingItemsMax * currentNavListChunk - 1;
+
+                                        this.log.debug(
+                                            `Loading more items for navigationUp from index ${nextChunkStart} ceilingItemsMax=${ceilingItemsMax} ceilingItems=${ceilingItems} remainderItemsMax=${remainderItemsMax}`,
+                                        );
+                                        await this.updateNavList(nextChunkStart);
+                                    } else if (ceilingItemsMax == ceilingItems && ceilingItems > 0) {
+                                        // Letzter Chunk, aber es gibt keine weiteren Items zu laden
+
+                                        this.log.debug(
+                                            'Last chunk for navigationUp reached, reloading list from beginning',
+                                        );
+
+                                        const endChunkStart = -1;
+                                        this.log.debug(
+                                            `Reloading Items for navigationUp from index ${endChunkStart} ceilingItemsMax=${ceilingItemsMax} ceilingItems=${ceilingItems} remainderItemsMax=${remainderItemsMax}`,
+                                        );
+                                        await this.updateNavList(endChunkStart);
+                                    }
+                                    /*else {
+                                        // Nur ein Chunk insgesamt und wir sind am Ende
+                                        // Gehe zum ersten Item dieses Chunks
+                                        this.log.debug('Single chunk list, jumping to first item');
+                                        tmpnr = 0;
+                                        if (tmpnr < currentNavList.length) {
+                                            nextKey = Number(currentNavList[tmpnr].$.key);
+                                        }
+
+                                        this.log.debug(
+                                            `In navigationUp: ceilingItemsMax=${ceilingItemsMax}, ceilingItems=${ceilingItems}, remainderItemsMax=${remainderItemsMax}`,
+                                        );
+                                    }
+                                        */
+                                    tmpnr = 0; // Bei neuem Chunk immer bei Index 0 starten
+                                    nextKey = currentNavList[tmpnr].$.key;
+                                } else {
+                                    // no new chunk required, skip to next index
+                                    nextKey = currentNavList[tmpnr].$.key;
+                                }
+                            } else {
+                                // numItems is -1, infinite list
+                                if (tmpnr >= currentNavList.length) {
+                                    // Wir sind am Ende der aktuellen Liste
+
+                                    if (currentNavNumItemsMax % currentNavListChunk > 0) {
+                                        // Es gibt keine weiteren Items zu laden, da das Ende der Liste erreicht ist
+                                        this.log.debug(
+                                            `No more items to load for navigationUp. End of list reached. Total NumItems in list ${currentNavNumItemsMax} Skip to start of list`,
+                                        );
+                                        await this.updateNavList();
+                                    } else {
+                                        // numItems is -1, follow keys starting with last key in currentNavList
+
+                                        this.log.debug(
+                                            `Loading more items for navigationUp from index ${currentNavList[tmpnr - 1].$.key}`,
+                                        );
+                                        await this.updateNavList(currentNavList[tmpnr - 1].$.key);
+                                    }
+                                    tmpnr = 0; // Bei neuem Chunk immer bei Index 0 starten
+                                    nextKey = currentNavList[tmpnr].$.key;
+                                } else {
+                                    // no new chunk required, skip to next index
+                                    nextKey = currentNavList[tmpnr].$.key;
+                                }
+                            }
+
+                            // Reload object after updateNavList
+                            // const updatedObj = await this.getObjectAsync('modes.currentNavKey');
+                            //if (updatedObj && updatedObj.native) {
+                            //    const updatedKeys = Object.values(updatedObj.common.states).map(k => Number(k));
+                            //}
+                            /*
+                             */
+                            if (
+                                nextKey !== undefined &&
+                                nextKey !== null &&
+                                tmpnr >= 0 &&
+                                tmpnr < currentNavList.length
+                            ) {
+                                /*
+                                    let name = currentNavList[tmpnr].field
+                                        .find(f => f.$.name === 'name')
+                                        .c8_array[0].trim();
+
+                                    let type = '';
+                                    let subtype = '';
+*/
+                                let name = '';
+
+                                currentNavList[tmpnr].field.forEach(f => {
+                                    switch (f.$.name) {
+                                        case 'name':
+                                            name = f.c8_array[0];
+                                            break;
+                                        case 'type':
+                                            currentNavType = f.u8[0];
+                                            break;
+                                        case 'subtype':
+                                            currentNavSubtype = f.u8[0];
+                                            break;
+                                        default:
+                                            break;
+                                    }
+                                });
+
+                                currentNavIndex = tmpnr;
+                                this.log.debug(`Next Item: Index=${tmpnr}, Key=${nextKey}, Name=${name}`);
+                                await adapter.setState('modes.currentNavIndex', { val: tmpnr, ack: true });
+                                await adapter.setState('modes.currentNavKey', {
+                                    val: Number(nextKey),
+                                    ack: true,
+                                });
+                                await adapter.setState(`modes.currentNavName`, { val: name, ack: true });
+                                // Aktualisiere das Objekt mit den neuen Werten
+
+                                const obj = await this.getObjectAsync('modes.currentNavKey');
+                                if (obj && obj.native) {
+                                    obj.native.currentNavIndex.value = Number(tmpnr);
+                                    obj.native.currentNavType.value = Number(currentNavType);
+                                    obj.native.currentNavSubtype.value = Number(currentNavSubtype);
+                                    await this.setObject('modes.currentNavKey', obj);
+                                }
+
+                                await adapter.setState(`modes.navigationUp`, { val: true, ack: true });
+                            } else {
+                                this.log.error(
+                                    `navigationUp: Invalid navigation state. nextKey=${nextKey}, tmpnr=${tmpnr}, currentNavList.length=${currentNavList.length}`,
+                                );
+                            }
+                            //}
+                            //}
+                        } catch (err) {
+                            this.log.debug(`Error in navigationUp: ${JSON.stringify(err)}`);
+                        }
+                    } else if (zustand[3] === 'navigationDown') {
+                        try {
+                            //let currKey = 0;
+                            let nextKey = 0;
+                            /*
+                            const currentKey = await adapter.getStateAsync('modes.currentNavKey');
+                            if (currentKey !== null && currentKey !== undefined && currentKey.val !== null) {
+                                currKey = Number(currentKey.val);
+                            }
+                                */
+                            /*
+                                const obj = await this.getObjectAsync('modes.currentNavKey');
+                                if (obj && obj.native) {
+                                    const currentNavNumItemsMax = obj.native.currentNavNumItemsMax.value;
+                                    const allKeys = Object.keys(obj.common.states).map(k => Number(k));
+
+                                    this.log.debug(
+                                        `All Keys: ${allKeys} Current key ${currKey}, currentNavNumItemsMax=${currentNavNumItemsMax}`,
+                                    );
+                                    let tmpnr = allKeys.indexOf(currKey);
+                                    this.log.debug(`Current Key Index: ${tmpnr} current key: ${currKey}`);
+                                    */
+                            let tmpnr = currentNavIndex;
+                            this.log.debug(
+                                `In navigationDown: Current Index: ${tmpnr} current key: ${currentNavList[tmpnr].$.key} currentNavNumItemsMax: ${currentNavNumItemsMax} currentNavNumItems: ${currentNavNumItems}`,
+                            );
+
+                            tmpnr -= 1;
+
+                            if (currentNavNumItems >= 0) {
+                                // normal list with numItems known
+                                // Check if we need to load more items
+                                if (tmpnr < 0) {
+                                    // Wir sind am Anfang der aktuellen Liste
+                                    let floorItemsMax = Math.floor(currentNavNumItemsMax / currentNavListChunk);
+                                    let floorItems = Math.floor(currentNavNumItems / currentNavListChunk);
+                                    let remainderItemsMax = currentNavNumItemsMax % currentNavListChunk;
+
+                                    if (floorItemsMax > 1) {
+                                        // Es gibt vorherige Items - lade vorherigen Chunk
+                                        const prevChunkStart =
+                                            remainderItemsMax > 0
+                                                ? (floorItemsMax - 1) * currentNavListChunk - 1
+                                                : (floorItemsMax - 2) * currentNavListChunk - 1;
+                                        this.log.debug(
+                                            `Loading previous items for navigationDown from index ${prevChunkStart} floorItemsMax=${floorItemsMax} remainderItemsMax=${remainderItemsMax}`,
+                                        );
+                                        await this.updateNavList(prevChunkStart);
+
+                                        // Reload object after updateNavList
+                                        /*
+                                            const updatedObj = await this.getObjectAsync('modes.currentNavKey');
+                                            if (updatedObj && updatedObj.native) {
+                                                const updatedKeys = Object.keys(updatedObj.common.states).map(k =>
+                                                    Number(k),
+                                                );
+                                                */
+                                        tmpnr = currentNavList.length - 1; // Bei neuem Chunk am Ende starten
+                                        nextKey = currentNavList[tmpnr].$.key;
+                                    } else if (floorItemsMax == 1) {
+                                        // Wir sind am Anfang des ersten Chunks, aber es gibt mehr Items insgesamt
+                                        // Springe zum Ende der Liste
+                                        const endChunkStart = Math.max(0, floorItems * currentNavListChunk - 1);
+                                        this.log.debug(
+                                            `At beginning of first list, loading from end at index ${endChunkStart}`,
+                                        );
+                                        await this.updateNavList(endChunkStart);
+
+                                        // Reload object after updateNavList
+                                        /*
+                                            const updatedObj = await this.getObjectAsync('modes.currentNavKey');
+                                            if (updatedObj && updatedObj.native) {
+                                                const updatedKeys = Object.keys(updatedObj.common.states).map(k =>
+                                                    Number(k),
+                                                );
+                                                */
+
+                                        tmpnr = currentNavList.length - 1; // Bei neuem Chunk am Ende starten
+                                        nextKey = currentNavList[tmpnr].$.key;
+                                    } else {
+                                        // Nur ein Chunk insgesamt und wir sind am Anfang
+                                        // Gehe zum letzten Item dieses Chunks
+                                        this.log.debug('Single chunk list, jumping to last item');
+                                        tmpnr = currentNavList.length - 1;
+                                        if (tmpnr >= 0) {
+                                            nextKey = Number(currentNavList[tmpnr].$.key);
+                                        }
+                                    }
+                                } else {
+                                    // Wir sind nicht am Anfang, können normal einen Index nach unten gehen
+                                    nextKey = currentNavList[tmpnr].$.key;
+                                }
+                            } else {
+                                // numItems is -1, infinite list
+                                // Check if we need to load more items
+                                if (tmpnr < 0) {
+                                    // Wir sind am Anfang der aktuellen Liste
+                                    let floorItemsMax = Math.floor(currentNavNumItemsMax / currentNavListChunk);
+                                    let floorItems = Math.floor(currentNavNumItems / currentNavListChunk);
+                                    let remainderItemsMax = currentNavNumItemsMax % currentNavListChunk;
+
+                                    if (floorItemsMax > 1) {
+                                        // Es gibt vorherige Items - lade vorherigen Chunk
+                                        const prevChunkStart =
+                                            remainderItemsMax > 0
+                                                ? (floorItemsMax - 1) * currentNavListChunk - 1
+                                                : (floorItemsMax - 2) * currentNavListChunk - 1;
+                                        this.log.debug(
+                                            `Loading previous items for navigationDown from index ${prevChunkStart} floorItemsMax=${floorItemsMax} remainderItemsMax=${remainderItemsMax}`,
+                                        );
+                                        await this.updateNavList(prevChunkStart);
+
+                                        // Reload object after updateNavList
+                                        /*
+                                            const updatedObj = await this.getObjectAsync('modes.currentNavKey');
+                                            if (updatedObj && updatedObj.native) {
+                                                const updatedKeys = Object.keys(updatedObj.common.states).map(k =>
+                                                    Number(k),
+                                                );
+                                                */
+                                        tmpnr = currentNavList.length - 1; // Bei neuem Chunk am Ende starten
+                                        nextKey = currentNavList[tmpnr].$.key;
+                                    } else if (floorItemsMax == 1) {
+                                        // Wir sind am Anfang des ersten Chunks, aber es gibt mehr Items insgesamt
+                                        // Springe zum Ende der Liste
+                                        const endChunkStart = Math.max(0, floorItems * currentNavListChunk - 1);
+                                        this.log.debug(
+                                            `At beginning of first list, loading from end at index ${endChunkStart}`,
+                                        );
+                                        await this.updateNavList(endChunkStart);
+
+                                        // Reload object after updateNavList
+                                        /*
+                                            const updatedObj = await this.getObjectAsync('modes.currentNavKey');
+                                            if (updatedObj && updatedObj.native) {
+                                                const updatedKeys = Object.keys(updatedObj.common.states).map(k =>
+                                                    Number(k),
+                                                );
+                                                */
+
+                                        tmpnr = currentNavList.length - 1; // Bei neuem Chunk am Ende starten
+                                        nextKey = currentNavList[tmpnr].$.key;
+                                    } else {
+                                        // Nur ein Chunk insgesamt und wir sind am Anfang
+                                        // Gehe zum letzten Item dieses Chunks
+                                        this.log.debug('Single chunk list, jumping to last item');
+                                        tmpnr = currentNavList.length - 1;
+                                        if (tmpnr >= 0) {
+                                            nextKey = Number(currentNavList[tmpnr].$.key);
+                                        }
+                                    }
+                                } else {
+                                    // Wir sind nicht am Anfang, können normal einen Index nach unten gehen
+                                    nextKey = currentNavList[tmpnr].$.key;
+                                }
+                            }
+
+                            if (
+                                nextKey !== undefined &&
+                                nextKey !== null &&
+                                tmpnr >= 0 &&
+                                tmpnr < currentNavList.length
+                            ) {
+                                let name = '';
+
+                                currentNavList[tmpnr].field.forEach(f => {
+                                    switch (f.$.name) {
+                                        case 'name':
+                                            name = f.c8_array[0];
+                                            break;
+                                        case 'type':
+                                            currentNavType = f.u8[0];
+                                            break;
+                                        case 'subtype':
+                                            currentNavSubtype = f.u8[0];
+                                            break;
+                                        default:
+                                            break;
+                                    }
+                                });
+
+                                this.log.debug(`Previous Item: Index=${tmpnr}, Key=${nextKey}, Name=${name}`);
+                                await adapter.setState('modes.currentNavIndex', { val: tmpnr, ack: true });
+                                await adapter.setState('modes.currentNavKey', {
+                                    val: Number(nextKey),
+                                    ack: true,
+                                });
+                                await adapter.setState(`modes.currentNavName`, { val: name, ack: true });
+                                // Aktualisiere das Objekt mit den neuen Werten
+                                currentNavIndex = tmpnr;
+
+                                const obj = await this.getObjectAsync('modes.currentNavKey');
+                                if (obj && obj.native) {
+                                    obj.native.currentNavIndex.value = Number(tmpnr);
+                                    obj.native.currentNavType.value = Number(currentNavType);
+                                    obj.native.currentNavSubtype.value = Number(currentNavSubtype);
+                                    await this.setObject('modes.currentNavKey', obj);
+                                }
+
+                                await adapter.setState(`modes.navigationDown`, { val: true, ack: true });
+                            } else {
+                                this.log.error(
+                                    `navigationDown: Invalid navigation state. nextKey=${nextKey}, tmpnr=${tmpnr}, currentNavList.length=${currentNavList.length}`,
+                                );
+                            }
+                        } catch (err) {
+                            this.log.debug(`Error in navigationDown: ${JSON.stringify(err)}`);
+                        }
+                    } else if (zustand[3] === 'navigationSelect') {
+                        try {
+                            let currKey;
+                            const currentKey = await adapter.getStateAsync('modes.currentNavKey');
+                            if (currentKey !== null && currentKey !== undefined && currentKey.val !== null) {
+                                currKey = Number(currentKey.val);
+                                /*
+                                const obj = await this.getObjectAsync('modes.currentNavKey');
+                                let type = '';
+                                let subtype = '';
+                                if (obj && obj.native) {
+                                    type = obj.native.currentNavType.value.toString(); // Zugriff auf den Key in der native Sektion
+                                    subtype = obj.native.currentNavSubtype.value.toString(); // Zugriff auf den Key in der native Sektion
+                                    this.log.debug(`navType: ${type}, navSubtype: ${subtype}`);
+                                } else {
+                                    this.log.debug('Objekt oder native Sektion nicht gefunden');
+                                }
+                                    */
+
+                                if (currentNavType == 0) {
+                                    // directory
+                                    let response = await this.callAPI(
+                                        'netRemote.nav.action.navigate',
+                                        currKey.toString(),
+                                    );
+                                    if (response.success) {
+                                        await this.updateNavList();
+                                        await adapter.setState(`modes.navigationSelect`, { val: true, ack: true });
+                                    }
+                                } else if (currentNavType == 1) {
+                                    // Playable item
+                                    const response = await this.callAPI(
+                                        'netRemote.nav.action.selectItem',
+                                        currKey.toString(),
+                                    );
+                                    if (response.success) {
+                                        await adapter.setState(`modes.navigationSelect`, {
+                                            val: true,
+                                            ack: true,
+                                        });
+                                    }
+                                } else if (currentNavType == 2) {
+                                    // Search directory
+                                    let searchTerm = '';
+                                    const currentSearch = await adapter.getStateAsync('modes.navigationSearch');
+                                    if (
+                                        currentSearch !== null &&
+                                        currentSearch !== undefined &&
+                                        currentSearch.val !== null
+                                    ) {
+                                        searchTerm = currentSearch.val.toString();
+                                        let response = await this.callAPI('netRemote.nav.searchTerm', searchTerm);
+                                        if (response.success) {
+                                            this.log.debug(`Sent Search Term: ${searchTerm}`);
+                                        }
+                                    }
+                                    let response = await this.callAPI('netRemote.nav.searchTerm');
+                                    if (response.success && response.result.value[0].c8_array[0].trim() == searchTerm) {
+                                        this.log.debug(`SearchTerm verified`);
+                                        response = await this.callAPI(
+                                            'netRemote.nav.action.navigate',
+                                            currKey.toString(),
+                                        );
+                                        if (response.success) {
+                                            await this.updateNavList();
+                                            await adapter.setState(`modes.navigationSelect`, { val: true, ack: true });
+                                        }
+                                    } else {
+                                        this.log.debug(
+                                            `SearchTerm error: ${response.result.value[0].c8_array[0].trim()} <> ${searchTerm}`,
+                                        );
+                                    }
+                                }
+                            }
+                        } catch (err) {
+                            this.log.debug(`Error in navigationSelect: ${JSON.stringify(err)}`);
+                        }
+                    } else if (zustand[3] === 'navigationBack') {
+                        try {
+                            //const obj = await this.getObjectAsync('modes.currentNavKey');
+                            if (currentNavNumItems >= 0) {
+                                // only go back if navigation is possible
+                                let response = await this.callAPI('netRemote.nav.action.navigate', '0xFFFFFFFF');
+                                if (response.success) {
+                                    await this.updateNavList();
+                                }
+                            }
+                            await adapter.setState(`modes.navigationBack`, { val: true, ack: true });
+                        } catch (err) {
+                            this.log.debug(`Error in navigationBack: ${JSON.stringify(err)}`);
+                        }
+                    } else if (zustand[3] === 'navigationSearch') {
+                        try {
+                            await adapter.setState(`modes.navigationSearch`, { ack: true });
+                        } catch (err) {
+                            this.log.debug(`Error in navigationBack: ${JSON.stringify(err)}`);
+                        }
                     }
+
                     break;
+
                 case 'audio':
                     if (zustand[3] === 'volume' && state.val !== null) {
                         await this.callAPI('netRemote.nav.state', '1');
@@ -330,8 +989,8 @@ class FrontierSilicon extends utils.Adapter {
                         if (typeof state.val === 'number' && state.val >= 0 && state.val <= this.config.VolumeMax) {
                             await adapter
                                 .callAPI('netRemote.sys.audio.volume', state.val.toString())
-                                .then(async function (result) {
-                                    if (result.success) {
+                                .then(async function (response) {
+                                    if (response.success) {
                                         await adapter.setState('audio.volume', { val: Number(state.val), ack: true });
                                     }
                                 });
@@ -340,8 +999,8 @@ class FrontierSilicon extends utils.Adapter {
                         await this.callAPI('netRemote.nav.state', '1');
                         await adapter
                             .callAPI('netRemote.sys.audio.mute', state.val ? '1' : '0')
-                            .then(async function (result) {
-                                if (result.success) {
+                            .then(async function (response) {
+                                if (response.success) {
                                     await adapter.setState('audio.mute', { val: state.val, ack: true });
                                 }
                             });
@@ -349,19 +1008,19 @@ class FrontierSilicon extends utils.Adapter {
                         switch (zustand[4]) {
                             case 'volumeUp':
                                 await this.callAPI('netRemote.nav.state', '1');
-                                await adapter.getStateAsync('audio.volume').then(async function (result) {
+                                await adapter.getStateAsync('audio.volume').then(async function (response) {
                                     if (
-                                        result != null &&
-                                        result != undefined &&
-                                        result.val != null &&
-                                        result.val != undefined &&
-                                        Number(result.val) < adapter.config.VolumeMax
+                                        response != null &&
+                                        response != undefined &&
+                                        response.val != null &&
+                                        response.val != undefined &&
+                                        Number(response.val) < adapter.config.VolumeMax
                                     ) {
-                                        const vol = parseInt(result.val.toString()) + 1;
+                                        const vol = parseInt(response.val.toString()) + 1;
                                         await adapter
                                             .callAPI('netRemote.sys.audio.volume', vol.toString())
-                                            .then(async function (result) {
-                                                if (result.success) {
+                                            .then(async function (response) {
+                                                if (response.success) {
                                                     await adapter.setState('audio.volume', {
                                                         val: Number(vol),
                                                         ack: true,
@@ -377,19 +1036,19 @@ class FrontierSilicon extends utils.Adapter {
                                 break;
                             case 'volumeDown':
                                 await this.callAPI('netRemote.nav.state', '1');
-                                await adapter.getStateAsync('audio.volume').then(async function (result) {
+                                await adapter.getStateAsync('audio.volume').then(async function (response) {
                                     if (
-                                        result != null &&
-                                        result != undefined &&
-                                        result.val != null &&
-                                        result.val != undefined &&
-                                        Number(result.val) > 0
+                                        response != null &&
+                                        response != undefined &&
+                                        response.val != null &&
+                                        response.val != undefined &&
+                                        Number(response.val) > 0
                                     ) {
-                                        const vol = parseInt(result.val.toString()) - 1;
+                                        const vol = parseInt(response.val.toString()) - 1;
                                         await adapter
                                             .callAPI('netRemote.sys.audio.volume', vol.toString())
-                                            .then(async function (result) {
-                                                if (result.success) {
+                                            .then(async function (response) {
+                                                if (response.success) {
                                                     await adapter.setState('audio.volume', {
                                                         val: Number(vol),
                                                         ack: true,
@@ -411,36 +1070,36 @@ class FrontierSilicon extends utils.Adapter {
                 case 'media':
                     if (zustand[3] === 'control' && zustand[4] === 'stop') {
                         await this.callAPI('netRemote.nav.state', '1');
-                        await this.callAPI('netRemote.play.control', '0').then(async function (result) {
-                            if (result.success) {
+                        await this.callAPI('netRemote.play.control', '0').then(async function (response) {
+                            if (response.success) {
                                 await adapter.setState(`media.control.stop`, { val: true, ack: true });
                             }
                         });
                     } else if (zustand[3] === 'control' && zustand[4] === 'play') {
                         await this.callAPI('netRemote.nav.state', '1');
-                        await this.callAPI('netRemote.play.control', '1').then(async function (result) {
-                            if (result.success) {
+                        await this.callAPI('netRemote.play.control', '1').then(async function (response) {
+                            if (response.success) {
                                 await adapter.setState(`media.control.play`, { val: true, ack: true });
                             }
                         });
                     } else if (zustand[3] === 'control' && zustand[4] === 'pause') {
                         await this.callAPI('netRemote.nav.state', '1');
-                        await this.callAPI('netRemote.play.control', '2').then(async function (result) {
-                            if (result.success) {
+                        await this.callAPI('netRemote.play.control', '2').then(async function (response) {
+                            if (response.success) {
                                 await adapter.setState(`media.control.pause`, { val: true, ack: true });
                             }
                         });
                     } else if (zustand[3] === 'control' && zustand[4] === 'next') {
                         await this.callAPI('netRemote.nav.state', '1');
-                        await this.callAPI('netRemote.play.control', '3').then(async function (result) {
-                            if (result.success) {
+                        await this.callAPI('netRemote.play.control', '3').then(async function (response) {
+                            if (response.success) {
                                 await adapter.setState(`media.control.next`, { val: true, ack: true });
                             }
                         });
                     } else if (zustand[3] === 'control' && zustand[4] === 'previous') {
                         await this.callAPI('netRemote.nav.state', '1');
-                        await this.callAPI('netRemote.play.control', '4').then(async function (result) {
-                            if (result.success) {
+                        await this.callAPI('netRemote.play.control', '4').then(async function (response) {
+                            if (response.success) {
                                 await adapter.setState(`media.control.previous`, { val: true, ack: true });
                             }
                         });
@@ -469,15 +1128,15 @@ class FrontierSilicon extends utils.Adapter {
         this.sleep(100);
         // eslint-disable-next-line @typescript-eslint/no-this-alias
         const adapter = this;
-        this.callAPI('netRemote.sys.mode').then(function (result) {
-            adapter.getStateAsync(`modes.${result.result.value[0].u32[0]}.id`).then(function (res) {
+        this.callAPI('netRemote.sys.mode').then(function (response) {
+            adapter.getStateAsync(`modes.${response.result.value[0].u32[0]}.id`).then(function (res) {
                 if (res !== null && res !== undefined && res.val !== null && res.val === 'DAB') {
                     adapter.sleep(2000).then(function () {
                         adapter.getStateAsync('modes.mediaplayer').then(function (r) {
                             if (r !== null && r !== undefined && r.val !== null) {
                                 adapter.callAPI('netRemote.sys.mode', r.val.toString());
                                 adapter.sleep(2000).then(function () {
-                                    adapter.callAPI('netRemote.sys.mode', result.result.value[0].u32[0]);
+                                    adapter.callAPI('netRemote.sys.mode', response.result.value[0].u32[0]);
                                 });
                             }
                         });
@@ -499,9 +1158,9 @@ class FrontierSilicon extends utils.Adapter {
             },
             native: {},
         });
-        let result = await this.callAPI('netRemote.sys.info.radioId');
-        if (result.success) {
-            await this.setState('device.radioId', { val: result.result.value[0].c8_array[0], ack: true });
+        let response = await this.callAPI('netRemote.sys.info.radioId');
+        if (response.success) {
+            await this.setState('device.radioId', { val: response.result.value[0].c8_array[0], ack: true });
         }
 
         //netRemote.sys.caps.volumeSteps
@@ -516,28 +1175,31 @@ class FrontierSilicon extends utils.Adapter {
             },
             native: {},
         });
-        result = await this.callAPI('netRemote.sys.caps.volumeSteps');
-        if (result.success) {
-            await this.setState('audio.maxVolume', { val: result.result.value[0].u8[0] - 1, ack: true });
-            this.config.VolumeMax = result.result.value[0].u8[0] - 1;
+        response = await this.callAPI('netRemote.sys.caps.volumeSteps');
+        if (response.success) {
+            await this.setState('audio.maxVolume', { val: response.result.value[0].u8[0] - 1, ack: true });
+            this.config.VolumeMax = response.result.value[0].u8[0] - 1;
         }
 
-        result = await this.callAPI('netRemote.sys.caps.validModes', '', -1, 100);
+        response = await this.callAPI('netRemote.sys.caps.validModes', '', -1, 100);
 
-        if (!result.success) {
+        if (!response.success) {
             return;
         }
 
-        let key = result.result.item[0].$.key;
+        let key = response.result.item[0].$.key;
         let selectable = false;
         let label = '';
         let streamable = false;
         let id = '';
         const proms = [];
         const promo = [];
+        const modeKeys = [];
+        const modeLabels = [];
 
-        result.result.item.forEach(item => {
+        response.result.item.forEach(item => {
             key = item.$.key;
+            modeKeys.push(key);
             id = '';
             selectable = false;
             label = '';
@@ -552,6 +1214,7 @@ class FrontierSilicon extends utils.Adapter {
                         break;
                     case 'label':
                         label = f.c8_array[0];
+                        modeLabels.push(label);
                         break;
                     case 'streamable':
                         streamable = f.u8[0] == 1;
@@ -686,8 +1349,15 @@ class FrontierSilicon extends utils.Adapter {
             }
             this.log.debug(`ID: ${id} - Selectable: ${selectable} - Label: ${label} - Key: ${key}`);
         });
+
+        // Loop to insert key & value in modes object
+        for (let i = 0; i < modeKeys.length; i++) {
+            allModes[modeKeys[i]] = modeLabels[i];
+        }
+        //this.log.debug(`Discovered modes: ${JSON.stringify(allModes)}`);
+
         await Promise.all(promo);
-        result.result.item.forEach(item => {
+        response.result.item.forEach(item => {
             key = item.$.key;
             id = '';
             selectable = false;
@@ -731,23 +1401,172 @@ class FrontierSilicon extends utils.Adapter {
     }
 
     /**
+     * Update navigation list after mode switch or after selecting a directory
+     */
+
+    async updateNavList(startItem) {
+        try {
+            this.log.debug('Updating navigation list');
+            await this.enableNavIfNeccessary();
+            await this.sleep(1000);
+            let response = await this.callAPI('netRemote.nav.numitems');
+            if (response.success) {
+                currentNavNumItems = response.result.value[0].s32[0];
+                this.log.debug(`Number of items in current mode: ${response.result.value[0].s32[0]}`);
+            }
+
+            // Bestimme den Startpunkt für das Laden
+            let startIndex = -1;
+            let newNavNumItemsMax = 0;
+
+            if (startItem !== undefined && startItem !== null && startItem >= 0) {
+                // Neuer Chunk wird angefordert
+                startIndex = startItem;
+                if (currentNavNumItems >= 0) {
+                    // normal list with numItems known - calculate new max
+                    newNavNumItemsMax = Math.floor((startItem + 1) / currentNavListChunk) * currentNavListChunk;
+                    this.log.debug(
+                        `Assuming normal list, startIndex=${startIndex}, newNavNumItemsMax=${newNavNumItemsMax}`,
+                    );
+                } else {
+                    // No numItems known - assume infinite list
+                    //newNavNumItemsMax = currentNavNumItemsMax;
+                    let indexOfKey = currentNavList.findIndex(item => item.$.key == startItem.toString()) + 1;
+                    newNavNumItemsMax = currentNavNumItemsMax + indexOfKey;
+                    this.log.debug(
+                        `Assuming infinite list, startIndex=${startIndex}, newNavNumItemsMax=${newNavNumItemsMax} indexOfKey=${indexOfKey}`,
+                    );
+                }
+            } else {
+                // Erstes Laden oder Reset
+                startIndex = -1;
+                newNavNumItemsMax = 0;
+            }
+
+            this.log.debug(
+                `updateNavList: Loading from startIndex=${startIndex}, newNavNumItemsMax=${newNavNumItemsMax}`,
+            );
+            response = await this.callAPI('netRemote.nav.list', '', startIndex, currentNavListChunk);
+            if (response.success) {
+                currentNavList = response.result.item;
+                this.log.debug(`Current List: ${JSON.stringify(currentNavList)} Length: ${currentNavList.length}`);
+
+                let allKeys = [];
+                let allNames = [];
+                let currentNavItems = {};
+
+                currentNavList.forEach(item => {
+                    allKeys.push(item.$.key);
+                    allNames.push(item.field.find(f => f.$.name === 'name').c8_array[0].trim());
+                });
+                // Loop to insert key & value in modes object
+                for (let i = 0; i < allKeys.length; i++) {
+                    currentNavItems[i] = allNames[i];
+                }
+
+                this.log.debug(
+                    `Current nav items: ${JSON.stringify(currentNavItems)} allKeys: ${allKeys} allNames: ${allNames}`,
+                );
+
+                // Update navigation with new values
+                currentNavIndex = 0;
+                currentNavNumItemsMax = newNavNumItemsMax + currentNavList.length;
+                let key = currentNavList[currentNavIndex].$.key;
+                let name = '';
+
+                currentNavList[currentNavIndex].field.forEach(f => {
+                    switch (f.$.name) {
+                        case 'name':
+                            name = f.c8_array[0];
+                            break;
+                        case 'type':
+                            currentNavType = f.u8[0];
+                            break;
+                        case 'subtype':
+                            currentNavSubtype = f.u8[0];
+                            break;
+                        default:
+                            break;
+                    }
+                });
+                this.log.debug(
+                    `updateNavList: Loaded from startIndex=${startIndex}, currentNavNumItemsMax=${currentNavNumItemsMax}`,
+                );
+                this.log.debug(
+                    `First item in current nav list: Key=${key}, Name=${name}, Type=${currentNavType}, Subtype=${currentNavSubtype}`,
+                );
+
+                await this.setState('modes.currentNavIndex', {
+                    val: Number(currentNavIndex),
+                    ack: true,
+                });
+
+                await this.setState('modes.currentNavKey', {
+                    val: Number(key),
+                    ack: true,
+                });
+
+                await this.setState('modes.currentNavName', {
+                    val: name,
+                    ack: true,
+                });
+
+                // Aktualisiere das Objekt mit den neuen Werten
+                const obj = await this.getObjectAsync('modes.currentNavKey');
+                if (obj && obj.native) {
+                    obj.native.currentNavNumItems.value = Number(currentNavNumItems);
+                    obj.native.currentNavNumItemsMax.value = Number(currentNavNumItemsMax);
+                    obj.native.currentNavIndex.value = Number(currentNavIndex);
+                    obj.common.states = currentNavItems;
+                    obj.native.currentNavType.value = Number(currentNavType);
+                    obj.native.currentNavSubtype.value = Number(currentNavSubtype);
+                    await this.setObject('modes.currentNavKey', obj);
+                }
+            }
+        } catch (err) {
+            this.log.debug(`Error in updateNavList: ${JSON.stringify(err)}`);
+        }
+    }
+
+    /**
+     * Enable navigation if it is disabled
+     */
+
+    async enableNavIfNeccessary() {
+        try {
+            const response = await this.callAPI('netRemote.nav.state');
+            if (response.success) {
+                this.log.debug(
+                    `Navigation state: ${JSON.stringify(response)} result: ${response.result.value[0].u8[0]}`,
+                );
+                if (response.result.value[0].u8[0] == 0) {
+                    // Navigation is disabled, enable it
+                    await this.callAPI('netRemote.nav.state', '1');
+                }
+            }
+        } catch (err) {
+            this.log.debug(`Error in enableNavIfNeccessary: ${JSON.stringify(err)}`);
+        }
+    }
+
+    /**
      * Reads presets for all modes
      *
      * @param {boolean} force Force rescan of all presets
      */
     async getAllPresets(force) {
         this.log.debug('Getting presets');
-        let result = await this.callAPI('netRemote.nav.state', '1');
-        if (!result.success) {
+        let response = await this.callAPI('netRemote.nav.state', '1');
+        if (!response.success) {
             return;
         }
-        result = await this.callAPI('netRemote.sys.mode');
-        const mode = result.result.value[0].u32[0]; // save original mode
+        response = await this.callAPI('netRemote.sys.mode');
+        const mode = response.result.value[0].u32[0]; // save original mode
         let unmute = false;
 
-        const mute = await this.callAPI('netRemote.sys.audio.mute');
-        unmute = mute.result.value[0].u8[0] == 0;
-        this.log.debug(`Mute: ${JSON.stringify(mute)} - Unmute: ${unmute.toString()}`);
+        response = await this.callAPI('netRemote.sys.audio.mute');
+        unmute = response.result.value[0].u8[0] == 0;
+        this.log.debug(`Mute: ${JSON.stringify(response)} - Unmute: ${unmute.toString()}`);
 
         for (let i = 0; i <= this.config.ModeMaxIndex; ++i) {
             this.log.debug('Getting Modes');
@@ -775,10 +1594,10 @@ class FrontierSilicon extends utils.Adapter {
     async getModePresets(mode, unmute = false) {
         this.log.debug(`Presets of mode ${mode}`);
 
-        let result = await this.callAPI('netRemote.sys.mode', mode.toString());
+        let response = await this.callAPI('netRemote.sys.mode', mode.toString());
         await this.sleep(1000);
-        result = await this.callAPI('netRemote.nav.state', '1');
-        result = await this.callAPI('netRemote.nav.presets', '', -1, 65535);
+        response = await this.callAPI('netRemote.nav.state', '1');
+        response = await this.callAPI('netRemote.nav.presets', '', -1, 65535);
 
         let key = 0;
         let name = '';
@@ -804,9 +1623,28 @@ class FrontierSilicon extends utils.Adapter {
             },
             native: {},
         });
-        await this.setState(`modes.${mode}.presets.available`, { val: result.success, ack: true });
-        //this.log.debug(result.success.toString() + " - " + result.result.status[0].toString());
-        if (!result.success) {
+
+        await this.setObjectNotExistsAsync(`modes.${mode}.presets.number`, {
+            type: 'state',
+            common: {
+                name: 'Number of Presets available',
+                type: 'number',
+                role: 'value.max',
+                read: true,
+                write: false,
+            },
+            native: {},
+        });
+
+        await this.setState(`modes.${mode}.presets.available`, { val: response.success, ack: true });
+        //this.log.debug(response.success.toString() + " - " + response.result.status[0].toString());
+        if (!response.success) {
+            return;
+        }
+
+        await this.setState(`modes.${mode}.presets.number`, { val: response.result.item.length, ack: true });
+        this.log.debug(`${response.result.item.length} presets found`);
+        if (!response.success) {
             return;
         }
 
@@ -815,7 +1653,7 @@ class FrontierSilicon extends utils.Adapter {
         }
         const proms = [];
         const promo = [];
-        result.result.item.forEach(item => {
+        response.result.item.forEach(item => {
             //this.setState(`modes.${mode}.presets.available`, { val: true, ack: true });
             key = item.$.key;
             let pro = this.setObjectNotExistsAsync(`modes.${mode}.presets.${key}`, {
@@ -867,7 +1705,7 @@ class FrontierSilicon extends utils.Adapter {
         });
         // Wait for all object creation processes
         await Promise.all(promo);
-        result.result.item.forEach(item => {
+        response.result.item.forEach(item => {
             //this.setState(`modes.${mode}.presets.available`, { val: true, ack: true });
             key = item.$.key;
             item.field.forEach(f => {
@@ -907,11 +1745,11 @@ class FrontierSilicon extends utils.Adapter {
                 },
                 native: {},
             });
-            let power = await this.callAPI('netRemote.sys.power');
-            //this.log.debug(JSON.stringify(power));
-            if (power.success) {
-                this.log.debug(`Power: ${power.result.value[0].u8[0] == 1}`);
-                await this.setState('device.power', { val: power.result.value[0].u8[0] == 1, ack: true });
+            let response = await this.callAPI('netRemote.sys.result');
+            //this.log.debug(JSON.stringify(response));
+            if (response.success) {
+                this.log.debug(`Power: ${response.result.value[0].u8[0] == 1}`);
+                await this.setState('device.power', { val: response.result.value[0].u8[0] == 1, ack: true });
             }
 
             // dailight saving time
@@ -926,11 +1764,11 @@ class FrontierSilicon extends utils.Adapter {
                 },
                 native: {},
             });
-            let dayLightSavingTime = await this.callAPI('netRemote.sys.clock.dst');
-            if (dayLightSavingTime.success) {
-                this.log.debug(`Daylight Saving Time: ${dayLightSavingTime.result.value[0].u8[0] == 1}`);
+            response = await this.callAPI('netRemote.sys.clock.dst');
+            if (response.success) {
+                this.log.debug(`Daylight Saving Time: ${response.result.value[0].u8[0] == 1}`);
                 await this.setState('device.dayLightSavingTime', {
-                    val: dayLightSavingTime.result.value[0].u8[0] == 1,
+                    val: response.result.value[0].u8[0] == 1,
                     ack: true,
                 });
             }
@@ -943,13 +1781,14 @@ class FrontierSilicon extends utils.Adapter {
                     role: 'media.input',
                     read: true,
                     write: true,
+                    states: JSON.parse(JSON.stringify(allModes)),
                 },
                 native: {},
             });
-            power = await this.callAPI('netRemote.sys.mode');
+            response = await this.callAPI('netRemote.sys.mode');
             let modeSelected = null;
-            if (power.success) {
-                modeSelected = power.result.value[0].u32[0];
+            if (response.success) {
+                modeSelected = response.result.value[0].u32[0];
                 this.log.debug(`Mode1: ${modeSelected}`);
                 await this.setState('modes.selected', { val: Number(modeSelected), ack: true });
             }
@@ -967,7 +1806,7 @@ class FrontierSilicon extends utils.Adapter {
             });
             const modeLabel = await this.getStateAsync(`modes.${modeSelected}.label`);
             this.log.debug(`modeLabel: ${JSON.stringify(modeLabel)}`);
-            if (power.success && modeLabel && modeLabel !== null) {
+            if (response.success && modeLabel && modeLabel !== null) {
                 this.log.debug(`ModeLabel: ${modeLabel.val}`);
                 await this.setState('modes.selectedLabel', { val: modeLabel.val, ack: true });
             }
@@ -977,12 +1816,174 @@ class FrontierSilicon extends utils.Adapter {
                     name: 'Select preset',
                     type: 'number',
                     role: 'media.track',
-                    read: false,
+                    read: true,
                     write: true,
                 },
                 native: {},
             });
             //this.getSelectedPreset();
+            await this.setObjectNotExistsAsync(`modes.presetDown`, {
+                type: 'state',
+                common: {
+                    name: 'Presets down',
+                    type: 'boolean',
+                    role: 'button',
+                    def: false,
+                    read: false,
+                    write: true,
+                },
+                native: {},
+            });
+            await this.setObjectNotExistsAsync(`modes.presetUp`, {
+                type: 'state',
+                common: {
+                    name: 'Presets up',
+                    type: 'boolean',
+                    role: 'button',
+                    def: false,
+                    read: false,
+                    write: true,
+                },
+                native: {},
+            });
+
+            await this.setObjectNotExistsAsync(`modes.navigationDown`, {
+                type: 'state',
+                common: {
+                    name: 'Navigation down',
+                    type: 'boolean',
+                    role: 'button',
+                    def: false,
+                    read: false,
+                    write: true,
+                },
+                native: {},
+            });
+
+            await this.setObjectNotExistsAsync(`modes.navigationUp`, {
+                type: 'state',
+                common: {
+                    name: 'Navigation up',
+                    type: 'boolean',
+                    role: 'button',
+                    def: false,
+                    read: false,
+                    write: true,
+                },
+                native: {},
+            });
+
+            await this.setObjectNotExistsAsync(`modes.navigationSelect`, {
+                type: 'state',
+                common: {
+                    name: 'Navigation select',
+                    type: 'boolean',
+                    role: 'button',
+                    def: false,
+                    read: false,
+                    write: true,
+                },
+                native: {},
+            });
+
+            await this.setObjectNotExistsAsync(`modes.navigationBack`, {
+                type: 'state',
+                common: {
+                    name: 'Navigation back',
+                    type: 'boolean',
+                    role: 'button',
+                    def: false,
+                    read: false,
+                    write: true,
+                },
+                native: {},
+            });
+
+            this.setObjectNotExistsAsync(`modes.navigationSearch`, {
+                type: 'state',
+                common: {
+                    name: 'Navigation search term',
+                    type: 'string',
+                    role: 'media.navigation.search',
+                    read: true,
+                    write: true,
+                },
+                native: {},
+            });
+
+            this.setObjectNotExistsAsync(`modes.currentNavIndex`, {
+                type: 'state',
+                common: {
+                    name: 'Navigation index',
+                    type: 'number',
+                    role: 'media.navigationindex',
+                    read: true,
+                    write: false,
+                    states: {},
+                },
+                native: {},
+            });
+
+            this.setObjectNotExistsAsync(`modes.currentNavKey`, {
+                type: 'state',
+                common: {
+                    name: 'Navigation key',
+                    type: 'number',
+                    role: 'media.navigationkey',
+                    read: true,
+                    write: false,
+                },
+                native: {
+                    currentNavNumItems: {
+                        value: 'number',
+                    },
+                    currentNavNumItemsMax: {
+                        value: 'number',
+                    },
+                    currentNavIndex: {
+                        value: 'number',
+                    },
+                    currentNavType: {
+                        value: 'number',
+                        states: {
+                            0: 'Directory',
+                            1: 'PlayableItem',
+                            2: 'SearchDirectory',
+                            3: 'Unknown',
+                            4: 'FormItem',
+                            5: 'MessageItem',
+                            6: 'AmazonLogin',
+                        },
+                    },
+                    currentNavSubtype: {
+                        value: 'number',
+                        states: {
+                            0: 'None',
+                            1: 'Station',
+                            2: 'Podcast',
+                            3: 'Track',
+                            4: 'Text',
+                            5: 'Password',
+                            6: 'Options',
+                            7: 'Submit',
+                            8: 'Button',
+                            9: 'Disabled',
+                        },
+                    },
+                },
+            });
+
+            this.setObjectNotExistsAsync(`modes.currentNavName`, {
+                type: 'state',
+                common: {
+                    name: 'Navigation name',
+                    type: 'string',
+                    role: 'media.navigation.name',
+                    read: true,
+                    write: false,
+                },
+                native: {},
+            });
 
             await this.setObjectNotExistsAsync('media.name', {
                 type: 'state',
@@ -995,10 +1996,11 @@ class FrontierSilicon extends utils.Adapter {
                 },
                 native: {},
             });
-            power = await this.callAPI('netRemote.play.info.name');
-            if (power.success) {
-                this.setState('media.name', { val: power.result.value[0].c8_array[0].trim(), ack: true });
-                await this.UpdatePreset(power.result.value[0].c8_array[0].trim());
+            response = await this.callAPI('netRemote.play.info.name');
+            if (response.success) {
+                this.setState('media.name', { val: response.result.value[0].c8_array[0].trim(), ack: true });
+                await this.UpdatePreset(response.result.value[0].c8_array[0].trim());
+                await this.UpdateNavigation(response.result.value[0].c8_array[0].trim());
             }
 
             await this.setObjectNotExistsAsync('media.album', {
@@ -1012,9 +2014,9 @@ class FrontierSilicon extends utils.Adapter {
                 },
                 native: {},
             });
-            power = await this.callAPI('netRemote.play.info.album');
-            if (power.success) {
-                await this.setState('media.album', { val: power.result.value[0].c8_array[0].trim(), ack: true });
+            response = await this.callAPI('netRemote.play.info.album');
+            if (response.success) {
+                await this.setState('media.album', { val: response.result.value[0].c8_array[0].trim(), ack: true });
             }
 
             await this.setObjectNotExistsAsync('media.title', {
@@ -1028,9 +2030,9 @@ class FrontierSilicon extends utils.Adapter {
                 },
                 native: {},
             });
-            power = await this.callAPI('netRemote.play.info.title');
-            if (power.success) {
-                await this.setState('media.title', { val: power.result.value[0].c8_array[0].trim(), ack: true });
+            response = await this.callAPI('netRemote.play.info.title');
+            if (response.success) {
+                await this.setState('media.title', { val: response.result.value[0].c8_array[0].trim(), ack: true });
             }
 
             await this.setObjectNotExistsAsync('media.artist', {
@@ -1044,9 +2046,9 @@ class FrontierSilicon extends utils.Adapter {
                 },
                 native: {},
             });
-            power = await this.callAPI('netRemote.play.info.artist');
-            if (power.success) {
-                await this.setState('media.artist', { val: power.result.value[0].c8_array[0].trim(), ack: true });
+            response = await this.callAPI('netRemote.play.info.artist');
+            if (response.success) {
+                await this.setState('media.artist', { val: response.result.value[0].c8_array[0].trim(), ack: true });
             }
 
             await this.setObjectNotExistsAsync('media.text', {
@@ -1060,9 +2062,9 @@ class FrontierSilicon extends utils.Adapter {
                 },
                 native: {},
             });
-            power = await this.callAPI('netRemote.play.info.text');
-            if (power.success) {
-                await this.setState('media.text', { val: power.result.value[0].c8_array[0].trim(), ack: true });
+            response = await this.callAPI('netRemote.play.info.text');
+            if (response.success) {
+                await this.setState('media.text', { val: response.result.value[0].c8_array[0].trim(), ack: true });
             }
 
             await this.setObjectNotExistsAsync('media.graphic', {
@@ -1076,13 +2078,13 @@ class FrontierSilicon extends utils.Adapter {
                 },
                 native: {},
             });
-            power = await this.callAPI('netRemote.play.info.graphicUri');
-            if (power.success) {
-                await this.setState('media.graphic', { val: power.result.value[0].c8_array[0].trim(), ack: true });
+            response = await this.callAPI('netRemote.play.info.graphicUri');
+            if (response.success) {
+                await this.setState('media.graphic', { val: response.result.value[0].c8_array[0].trim(), ack: true });
             }
 
             //netRemote.sys.audio.volume
-            power = await this.callAPI('netRemote.sys.audio.volume');
+            response = await this.callAPI('netRemote.sys.audio.volume');
             await this.setObjectNotExistsAsync('audio.volume', {
                 type: 'state',
                 common: {
@@ -1094,12 +2096,12 @@ class FrontierSilicon extends utils.Adapter {
                 },
                 native: {},
             });
-            if (power.success && power.value !== null) {
-                await this.setState('audio.volume', { val: Number(power.result.value[0].u8[0]), ack: true });
+            if (response.success && response.value !== null) {
+                await this.setState('audio.volume', { val: Number(response.result.value[0].u8[0]), ack: true });
             }
 
             //netRemote.sys.audio.mute
-            power = await this.callAPI('netRemote.sys.audio.mute');
+            response = await this.callAPI('netRemote.sys.audio.mute');
             await this.setObjectNotExistsAsync('audio.mute', {
                 type: 'state',
                 common: {
@@ -1111,8 +2113,8 @@ class FrontierSilicon extends utils.Adapter {
                 },
                 native: {},
             });
-            if (power.success && power.value !== null) {
-                await this.setState('audio.mute', { val: power.result.value[0].u8[0] == 1, ack: true });
+            if (response.success && response.value !== null) {
+                await this.setState('audio.mute', { val: response.result.value[0].u8[0] == 1, ack: true });
             }
 
             await this.setObjectNotExistsAsync('audio.control', {
@@ -1221,7 +2223,7 @@ class FrontierSilicon extends utils.Adapter {
                 },
                 native: {},
             });
-            power = await this.callAPI('netRemote.play.status');
+            response = await this.callAPI('netRemote.play.status');
             await this.setObjectNotExistsAsync('media.state', {
                 type: 'state',
                 common: {
@@ -1233,8 +2235,8 @@ class FrontierSilicon extends utils.Adapter {
                 },
                 native: {},
             });
-            if (power.success && power.value !== null) {
-                switch (power.result.value[0].u8[0]) {
+            if (response.success && response.value !== null) {
+                switch (response.result.value[0].u8[0]) {
                     // IDLE
                     case '0':
                         await this.setState('media.state', { val: 'IDLE', ack: true });
@@ -1721,19 +2723,19 @@ class FrontierSilicon extends utils.Adapter {
                 if (this.log.level == 'debug' || this.log.level == 'silly') {
                     this.setState('debug.lastNotifyCall', { val: notifyTimestamp, ack: true });
                 }
-                const result = await this.callAPI('', '', 0, 0, true);
+                const response = await this.callAPI('', '', 0, 0, true);
 
-                if (result.success) {
-                    //this.log.debug(JSON.stringify(result.result));
-                    result.result.notify.forEach(async item => {
+                if (response.success) {
+                    //this.log.debug(JSON.stringify(response.response));
+                    response.result.notify.forEach(async item => {
                         this.log.debug(`Item: ${item.$.node} - ${JSON.stringify(item.value)}`);
 
                         switch (item.$.node) {
                             case 'netremote.sys.state':
-                                await this.callAPI('netRemote.sys.power').then(function (result) {
-                                    if (result !== null && result !== undefined && result.val !== null) {
+                                await this.callAPI('netRemote.sys.power').then(function (response) {
+                                    if (response !== null && response !== undefined && response.val !== null) {
                                         adapter.setState('device.power', {
-                                            val: result.result.value[0].u8[0] == 1,
+                                            val: response.result.value[0].u8[0] == 1,
                                             ack: true,
                                         });
                                     }
@@ -1741,11 +2743,13 @@ class FrontierSilicon extends utils.Adapter {
                                 break;
                             case 'netremote.sys.mode':
                                 await this.setState('modes.selected', { val: Number(item.value[0].u32[0]), ack: true });
-                                await this.getStateAsync(`modes.${item.value[0].u32[0]}.label`).then(function (result) {
-                                    if (result !== null && result !== undefined && result.val !== null) {
-                                        adapter.setState('modes.selectedLabel', { val: result.val, ack: true });
-                                    }
-                                });
+                                await this.getStateAsync(`modes.${item.value[0].u32[0]}.label`).then(
+                                    function (response) {
+                                        if (response !== null && response !== undefined && response.val !== null) {
+                                            adapter.setState('modes.selectedLabel', { val: response.val, ack: true });
+                                        }
+                                    },
+                                );
                                 //adapter.setState("modes.selectPreset", {val:null, ack: true});
                                 //removed the following two lines to fix readPresets. Side effects tbs.
                                 //await this.getModePresets(item.value[0].u32[0], false);
@@ -1755,26 +2759,30 @@ class FrontierSilicon extends utils.Adapter {
                                 break;
                             case 'netremote.play.info.text':
                                 await this.setState('media.text', { val: item.value[0].c8_array[0].trim(), ack: true });
-                                await this.callAPI('netRemote.play.info.artist').then(function (result) {
-                                    if (result !== null && result !== undefined && result.val !== null) {
+                                await this.callAPI('netRemote.play.info.artist').then(function (response) {
+                                    if (response !== null && response !== undefined && response.val !== null) {
                                         adapter.setState('media.artist', {
-                                            val: result.result.value[0].c8_array[0],
+                                            val: response.result.value[0].c8_array[0],
                                             ack: true,
                                         });
                                     }
                                 });
-                                await this.callAPI('netremote.sys.mode').then(function (result) {
-                                    if (result !== null && result !== undefined && result.val !== null) {
+                                await this.callAPI('netremote.sys.mode').then(function (response) {
+                                    if (response !== null && response !== undefined && response.val !== null) {
                                         adapter.setState('modes.selected', {
-                                            val: Number(result.result.value[0].u32[0]),
+                                            val: Number(response.result.value[0].u32[0]),
                                             ack: true,
                                         });
                                         adapter
-                                            .getStateAsync(`modes.${result.result.value[0].u32[0]}.label`)
-                                            .then(function (result) {
-                                                if (result !== null && result !== undefined && result.val !== null) {
+                                            .getStateAsync(`modes.${response.result.value[0].u32[0]}.label`)
+                                            .then(function (response) {
+                                                if (
+                                                    response !== null &&
+                                                    response !== undefined &&
+                                                    response.val !== null
+                                                ) {
                                                     adapter.setState('modes.selectedLabel', {
-                                                        val: result.val,
+                                                        val: response.val,
                                                         ack: true,
                                                     });
                                                 }
@@ -1803,51 +2811,55 @@ class FrontierSilicon extends utils.Adapter {
                                 break;
                             case 'netremote.play.info.name':
                                 await this.setState('media.name', { val: item.value[0].c8_array[0].trim(), ack: true });
-                                await this.callAPI('netRemote.play.info.artist').then(function (result) {
-                                    if (result !== null && result !== undefined && result.val !== null) {
+                                await this.callAPI('netRemote.play.info.artist').then(function (response) {
+                                    if (response !== null && response !== undefined && response.val !== null) {
                                         adapter.setState('media.artist', {
-                                            val: result.result.value[0].c8_array[0],
+                                            val: response.result.value[0].c8_array[0],
                                             ack: true,
                                         });
                                     }
                                 });
-                                await this.callAPI('netRemote.play.info.album').then(function (result) {
-                                    if (result !== null && result !== undefined && result.val !== null) {
+                                await this.callAPI('netRemote.play.info.album').then(function (response) {
+                                    if (response !== null && response !== undefined && response.val !== null) {
                                         adapter.setState('media.album', {
-                                            val: result.result.value[0].c8_array[0],
+                                            val: response.result.value[0].c8_array[0],
                                             ack: true,
                                         });
                                     }
                                 });
-                                await this.callAPI('netremote.sys.audio.volume').then(function (result) {
-                                    if (result !== null && result !== undefined && result.val !== null) {
+                                await this.callAPI('netremote.sys.audio.volume').then(function (response) {
+                                    if (response !== null && response !== undefined && response.val !== null) {
                                         adapter.setState('audio.volume', {
-                                            val: Number(result.result.value[0].u8[0]),
+                                            val: Number(response.result.value[0].u8[0]),
                                             ack: true,
                                         });
                                     }
                                 });
-                                await this.callAPI('netremote.sys.audio.mute').then(function (result) {
-                                    if (result !== null && result !== undefined && result.val !== null) {
+                                await this.callAPI('netremote.sys.audio.mute').then(function (response) {
+                                    if (response !== null && response !== undefined && response.val !== null) {
                                         adapter.setState('audio.mute', {
-                                            val: result.result.value[0].u8[0] == 1,
+                                            val: response.result.value[0].u8[0] == 1,
                                             ack: true,
                                         });
                                     }
                                 });
 
-                                await this.callAPI('netremote.sys.mode').then(function (result) {
-                                    if (result !== null && result !== undefined && result.val !== null) {
+                                await this.callAPI('netremote.sys.mode').then(function (response) {
+                                    if (response !== null && response !== undefined && response.val !== null) {
                                         adapter.setState('modes.selected', {
-                                            val: Number(result.result.value[0].u32[0]),
+                                            val: Number(response.result.value[0].u32[0]),
                                             ack: true,
                                         });
                                         adapter
-                                            .getStateAsync(`modes.${result.result.value[0].u32[0]}.label`)
-                                            .then(function (result) {
-                                                if (result !== null && result !== undefined && result.val !== null) {
+                                            .getStateAsync(`modes.${response.result.value[0].u32[0]}.label`)
+                                            .then(function (response) {
+                                                if (
+                                                    response !== null &&
+                                                    response !== undefined &&
+                                                    response.val !== null
+                                                ) {
                                                     adapter.setState('modes.selectedLabel', {
-                                                        val: result.val,
+                                                        val: response.val,
                                                         ack: true,
                                                     });
                                                 }
@@ -1856,6 +2868,7 @@ class FrontierSilicon extends utils.Adapter {
                                     }
                                 });
                                 await this.UpdatePreset(item.value[0].c8_array[0].trim());
+                                await this.UpdateNavigation(item.value[0].c8_array[0].trim());
                                 break;
                             case 'netremote.sys.audio.volume':
                                 await this.setState('audio.volume', { val: Number(item.value[0].u8[0]), ack: true });
@@ -1914,9 +2927,9 @@ class FrontierSilicon extends utils.Adapter {
                                 break;
                         }
                     });
-                    this.callAPI('netRemote.play.info.graphicUri').then(async function (result) {
+                    this.callAPI('netRemote.play.info.graphicUri').then(async function (response) {
                         await adapter.setState('media.graphic', {
-                            val: result.result.value[0].c8_array[0].trim(),
+                            val: response.result.value[0].c8_array[0].trim(),
                             ack: true,
                         });
                     });
@@ -1935,6 +2948,48 @@ class FrontierSilicon extends utils.Adapter {
                 timeOutMessage = setTimeout(() => this.onFSAPIMessage(), this.config.PollIntervall * 1000);
                 polling = false;
             }
+        }
+    }
+
+    async UpdateNavigation(name) {
+        try {
+            if (!name) {
+                this.log.debug('UpdateNavigation: Name is undefined or empty.');
+                return;
+            }
+            let navFound = false;
+            let navKey = '';
+
+            for (const item of currentNavList) {
+                let navName = '';
+                item.field.forEach(f => {
+                    switch (f.$.name) {
+                        case 'name':
+                            navName = f.c8_array[0];
+                            break;
+                        default:
+                            break;
+                    }
+                });
+                if (navName === name) {
+                    this.log.debug(
+                        `UpdateNavigation: Found matching navigation item "${name}" with key ${item.$.key}.`,
+                    );
+                    navFound = true;
+                    navKey = item.$.key;
+                    break;
+                }
+            }
+            if (navFound) {
+                await this.setState('modes.currentNavIndex', {
+                    val: Number(navKey) >= currentNavListChunk ? Number(navKey) % currentNavListChunk : Number(navKey),
+                    ack: true,
+                });
+                await this.setState('modes.currentNavKey', { val: Number(navKey), ack: true });
+                await this.setState(`modes.currentNavName`, { val: name, ack: true });
+            }
+        } catch (error) {
+            this.log.error(`UpdateNavigation error: ${String(error)}`);
         }
     }
 
