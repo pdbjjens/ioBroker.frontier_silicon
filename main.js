@@ -34,9 +34,8 @@ let currentNavSubtype = 0;
 let currentNavList = [];
 const currentNavListChunk = 25;
 let allModes = {};
-//let currentNavChunks = []; // neu: Liste von Chunk-Start-Keys (als Strings) für infinite Listen
-//let currentNavChunkIndex = 0; // neu: aktueller Chunk-Index in currentNavChunks
-//let currentNavChunkStart = -1; // neu: Start-Key des aktuellen Chunks
+let currentNavChunks = []; // neu: Liste von Chunk-Start-Keys (als Strings) für infinite Listen
+let currentNavChunkIndex = 0; // neu: aktueller Chunk-Index in currentNavChunks
 
 class FrontierSilicon extends utils.Adapter {
     /**
@@ -503,129 +502,89 @@ class FrontierSilicon extends utils.Adapter {
                                 adapter.setState(`modes.presetDown`, { val: true, ack: true });
                             }
                         });
+                        // ...existing code...
                     } else if (zustand[3] === 'navigationUp') {
                         try {
-                            //let currKey = 0;
                             let nextKey = 0;
-                            /*
-                            const currentKey = await adapter.getStateAsync('modes.currentNavKey');
-                            if (currentKey !== null && currentKey !== undefined && currentKey.val !== null) {
-                                currKey = Number(currentKey.val);
-                                
-                                const obj = await this.getObjectAsync('modes.currentNavKey');
-                                if (obj && obj.native) {
-                                    const currentNavNumItems = obj.native.currentNavNumItems.value;
-                                    const currentNavNumItemsMax = obj.native.currentNavNumItemsMax.value;
-                                    const currentNavIndex = obj.native.currentNavIndex.value;
-                                    const allKeys = Object.values(obj.common.states).map(k => Number(k));
-
-                                    this.log.debug(`All Keys: ${allKeys} Current key ${currKey}`);
-*/
                             let tmpnr = currentNavIndex;
                             this.log.debug(
-                                `In navigationUp: Current Index: ${tmpnr} current key: ${currentNavList[tmpnr].$.key} currentNavNumItemsMax: ${currentNavNumItemsMax} currentNavNumItems: ${currentNavNumItems}`,
+                                `In navigationUp: Current Index: ${tmpnr} current key: ${currentNavList[tmpnr] ? currentNavList[tmpnr].$.key : 'n/a'} currentNavNumItemsMax: ${currentNavNumItemsMax} currentNavNumItems: ${currentNavNumItems}`,
                             );
 
                             tmpnr += 1;
                             if (currentNavNumItems >= 0) {
-                                // normal list with numItems known
-                                // Check if we need to load more items
-
+                                // normale Liste mit bekannter Länge
                                 if (tmpnr >= currentNavList.length) {
-                                    // Wir sind am Ende der aktuellen Liste
                                     let ceilingItemsMax = Math.ceil(currentNavNumItemsMax / currentNavListChunk);
                                     let ceilingItems = Math.ceil(currentNavNumItems / currentNavListChunk);
-                                    let remainderItemsMax = currentNavNumItemsMax % currentNavListChunk;
 
                                     if (ceilingItemsMax < ceilingItems) {
                                         // Es gibt noch mehr Items zu laden
                                         const nextChunkStart = ceilingItemsMax * currentNavListChunk - 1;
-
                                         this.log.debug(
-                                            `Loading more items for navigationUp from index ${nextChunkStart} ceilingItemsMax=${ceilingItemsMax} ceilingItems=${ceilingItems} remainderItemsMax=${remainderItemsMax}`,
+                                            `Loading more items for navigationUp from index ${nextChunkStart} ceilingItemsMax=${ceilingItemsMax} ceilingItems=${ceilingItems}`,
                                         );
                                         await this.updateNavList(nextChunkStart);
                                     } else if (ceilingItemsMax == ceilingItems && ceilingItems > 0) {
-                                        // Letzter Chunk, aber es gibt keine weiteren Items zu laden
-
-                                        this.log.debug(
-                                            'Last chunk for navigationUp reached, reloading list from beginning',
-                                        );
-
-                                        const endChunkStart = -1;
-                                        this.log.debug(
-                                            `Reloading Items for navigationUp from index ${endChunkStart} ceilingItemsMax=${ceilingItemsMax} ceilingItems=${ceilingItems} remainderItemsMax=${remainderItemsMax}`,
-                                        );
-                                        await this.updateNavList(endChunkStart);
+                                        // Letzter Chunk erreicht, zurück zum Anfang
+                                        this.log.debug('Last chunk reached, reloading list from beginning');
+                                        await this.updateNavList();
                                     }
-                                    /*else {
-                                        // Nur ein Chunk insgesamt und wir sind am Ende
-                                        // Gehe zum ersten Item dieses Chunks
-                                        this.log.debug('Single chunk list, jumping to first item');
-                                        tmpnr = 0;
-                                        if (tmpnr < currentNavList.length) {
-                                            nextKey = Number(currentNavList[tmpnr].$.key);
-                                        }
-
-                                        this.log.debug(
-                                            `In navigationUp: ceilingItemsMax=${ceilingItemsMax}, ceilingItems=${ceilingItems}, remainderItemsMax=${remainderItemsMax}`,
-                                        );
-                                    }
-                                        */
                                     tmpnr = 0; // Bei neuem Chunk immer bei Index 0 starten
                                     nextKey = currentNavList[tmpnr].$.key;
                                 } else {
-                                    // no new chunk required, skip to next index
                                     nextKey = currentNavList[tmpnr].$.key;
                                 }
                             } else {
-                                // numItems is -1, infinite list
+                                // infinite Liste: Chunk-Tracking korrekt nutzen und Wrap-Logik
                                 if (tmpnr >= currentNavList.length) {
-                                    // Wir sind am Ende der aktuellen Liste
+                                    // Wir sind am Ende des aktuellen Chunks
+                                    this.log.debug(
+                                        `Infinite list: end of current chunk reached (len=${currentNavList.length}, chunkSize=${currentNavListChunk}), currentChunkIndex=${currentNavChunkIndex}, knownChunks=${currentNavChunks.length}`,
+                                    );
 
-                                    if (currentNavNumItemsMax % currentNavListChunk > 0) {
-                                        // Es gibt keine weiteren Items zu laden, da das Ende der Liste erreicht ist
+                                    if (currentNavChunkIndex < currentNavChunks.length - 1) {
+                                        // Es gibt einen aufgezeichneten nächsten Chunk
+                                        const nextChunkId = currentNavChunks[currentNavChunkIndex + 1];
+                                        const startParam = nextChunkId === '-1' ? -1 : Number(nextChunkId);
                                         this.log.debug(
-                                            `No more items to load for navigationUp. End of list reached. Total NumItems in list ${currentNavNumItemsMax} Skip to start of list`,
+                                            `Infinite list: loading next recorded chunk, chunkIndex ${currentNavChunkIndex} -> ${currentNavChunkIndex + 1}`,
                                         );
-                                        await this.updateNavList();
+                                        await this.updateNavList(startParam);
                                     } else {
-                                        // numItems is -1, follow keys starting with last key in currentNavList
-
-                                        this.log.debug(
-                                            `Loading more items for navigationUp from index ${currentNavList[tmpnr - 1].$.key}`,
-                                        );
-                                        await this.updateNavList(currentNavList[tmpnr - 1].$.key);
+                                        // Kein aufgezeichneter nächster Chunk - check ob aktueller Chunk vollständig ist
+                                        if (currentNavList.length < currentNavListChunk) {
+                                            // Aktueller Chunk ist der letzte Chunk (unvollständig) -> WRAP zur ersten Seite
+                                            this.log.debug(
+                                                `Infinite list: last chunk detected (${currentNavList.length} < ${currentNavListChunk}), wrapping to first chunk`,
+                                            );
+                                            await this.updateNavList(-1);
+                                        } else {
+                                            // Lade nächsten Chunk dynamisch anhand des letzten Keys
+                                            const lastKey = currentNavList[currentNavList.length - 1].$.key;
+                                            this.log.debug(
+                                                `Infinite list: loading next chunk from last key ${lastKey}, currentChunks before=${JSON.stringify(currentNavChunks)}`,
+                                            );
+                                            await this.updateNavList(Number(lastKey));
+                                            this.log.debug(
+                                                `Infinite list: after updateNavList, currentChunks=${JSON.stringify(currentNavChunks)}, currentNavChunkIndex=${currentNavChunkIndex}`,
+                                            );
+                                        }
                                     }
-                                    tmpnr = 0; // Bei neuem Chunk immer bei Index 0 starten
-                                    nextKey = currentNavList[tmpnr].$.key;
+
+                                    tmpnr = 0;
+                                    nextKey = currentNavList[tmpnr] ? currentNavList[tmpnr].$.key : undefined;
                                 } else {
-                                    // no new chunk required, skip to next index
                                     nextKey = currentNavList[tmpnr].$.key;
                                 }
                             }
 
-                            // Reload object after updateNavList
-                            // const updatedObj = await this.getObjectAsync('modes.currentNavKey');
-                            //if (updatedObj && updatedObj.native) {
-                            //    const updatedKeys = Object.values(updatedObj.common.states).map(k => Number(k));
-                            //}
-                            /*
-                             */
                             if (
                                 nextKey !== undefined &&
                                 nextKey !== null &&
                                 tmpnr >= 0 &&
                                 tmpnr < currentNavList.length
                             ) {
-                                /*
-                                    let name = currentNavList[tmpnr].field
-                                        .find(f => f.$.name === 'name')
-                                        .c8_array[0].trim();
-
-                                    let type = '';
-                                    let subtype = '';
-*/
                                 let name = '';
 
                                 currentNavList[tmpnr].field.forEach(f => {
@@ -652,13 +611,13 @@ class FrontierSilicon extends utils.Adapter {
                                     ack: true,
                                 });
                                 await adapter.setState(`modes.currentNavName`, { val: name, ack: true });
-                                // Aktualisiere das Objekt mit den neuen Werten
 
                                 const obj = await this.getObjectAsync('modes.currentNavKey');
                                 if (obj && obj.native) {
-                                    obj.native.currentNavIndex.value = Number(tmpnr);
+                                    obj.native.currentNavIndex.value = Number(currentNavIndex);
                                     obj.native.currentNavType.value = Number(currentNavType);
                                     obj.native.currentNavSubtype.value = Number(currentNavSubtype);
+                                    obj.native.currentNavNumItemsMax.value = Number(currentNavNumItemsMax);
                                     await this.setObject('modes.currentNavKey', obj);
                                 }
 
@@ -668,33 +627,12 @@ class FrontierSilicon extends utils.Adapter {
                                     `navigationUp: Invalid navigation state. nextKey=${nextKey}, tmpnr=${tmpnr}, currentNavList.length=${currentNavList.length}`,
                                 );
                             }
-                            //}
-                            //}
                         } catch (err) {
                             this.log.debug(`Error in navigationUp: ${JSON.stringify(err)}`);
                         }
                     } else if (zustand[3] === 'navigationDown') {
                         try {
-                            //let currKey = 0;
                             let nextKey = 0;
-                            /*
-                            const currentKey = await adapter.getStateAsync('modes.currentNavKey');
-                            if (currentKey !== null && currentKey !== undefined && currentKey.val !== null) {
-                                currKey = Number(currentKey.val);
-                            }
-                                */
-                            /*
-                                const obj = await this.getObjectAsync('modes.currentNavKey');
-                                if (obj && obj.native) {
-                                    const currentNavNumItemsMax = obj.native.currentNavNumItemsMax.value;
-                                    const allKeys = Object.keys(obj.common.states).map(k => Number(k));
-
-                                    this.log.debug(
-                                        `All Keys: ${allKeys} Current key ${currKey}, currentNavNumItemsMax=${currentNavNumItemsMax}`,
-                                    );
-                                    let tmpnr = allKeys.indexOf(currKey);
-                                    this.log.debug(`Current Key Index: ${tmpnr} current key: ${currKey}`);
-                                    */
                             let tmpnr = currentNavIndex;
                             this.log.debug(
                                 `In navigationDown: Current Index: ${tmpnr} current key: ${currentNavList[tmpnr].$.key} currentNavNumItemsMax: ${currentNavNumItemsMax} currentNavNumItems: ${currentNavNumItems}`,
@@ -703,16 +641,13 @@ class FrontierSilicon extends utils.Adapter {
                             tmpnr -= 1;
 
                             if (currentNavNumItems >= 0) {
-                                // normal list with numItems known
-                                // Check if we need to load more items
+                                // normale Liste mit bekannter Länge
                                 if (tmpnr < 0) {
-                                    // Wir sind am Anfang der aktuellen Liste
                                     let floorItemsMax = Math.floor(currentNavNumItemsMax / currentNavListChunk);
                                     let floorItems = Math.floor(currentNavNumItems / currentNavListChunk);
                                     let remainderItemsMax = currentNavNumItemsMax % currentNavListChunk;
 
                                     if (floorItemsMax > 1) {
-                                        // Es gibt vorherige Items - lade vorherigen Chunk
                                         const prevChunkStart =
                                             remainderItemsMax > 0
                                                 ? (floorItemsMax - 1) * currentNavListChunk - 1
@@ -722,39 +657,17 @@ class FrontierSilicon extends utils.Adapter {
                                         );
                                         await this.updateNavList(prevChunkStart);
 
-                                        // Reload object after updateNavList
-                                        /*
-                                            const updatedObj = await this.getObjectAsync('modes.currentNavKey');
-                                            if (updatedObj && updatedObj.native) {
-                                                const updatedKeys = Object.keys(updatedObj.common.states).map(k =>
-                                                    Number(k),
-                                                );
-                                                */
-                                        tmpnr = currentNavList.length - 1; // Bei neuem Chunk am Ende starten
+                                        tmpnr = currentNavList.length - 1;
                                         nextKey = currentNavList[tmpnr].$.key;
                                     } else if (floorItemsMax == 1) {
-                                        // Wir sind am Anfang des ersten Chunks, aber es gibt mehr Items insgesamt
-                                        // Springe zum Ende der Liste
                                         const endChunkStart = Math.max(0, floorItems * currentNavListChunk - 1);
                                         this.log.debug(
                                             `At beginning of first list, loading from end at index ${endChunkStart}`,
                                         );
                                         await this.updateNavList(endChunkStart);
-
-                                        // Reload object after updateNavList
-                                        /*
-                                            const updatedObj = await this.getObjectAsync('modes.currentNavKey');
-                                            if (updatedObj && updatedObj.native) {
-                                                const updatedKeys = Object.keys(updatedObj.common.states).map(k =>
-                                                    Number(k),
-                                                );
-                                                */
-
-                                        tmpnr = currentNavList.length - 1; // Bei neuem Chunk am Ende starten
+                                        tmpnr = currentNavList.length - 1;
                                         nextKey = currentNavList[tmpnr].$.key;
                                     } else {
-                                        // Nur ein Chunk insgesamt und wir sind am Anfang
-                                        // Gehe zum letzten Item dieses Chunks
                                         this.log.debug('Single chunk list, jumping to last item');
                                         tmpnr = currentNavList.length - 1;
                                         if (tmpnr >= 0) {
@@ -762,70 +675,56 @@ class FrontierSilicon extends utils.Adapter {
                                         }
                                     }
                                 } else {
-                                    // Wir sind nicht am Anfang, können normal einen Index nach unten gehen
                                     nextKey = currentNavList[tmpnr].$.key;
                                 }
                             } else {
-                                // numItems is -1, infinite list
-                                // Check if we need to load more items
+                                // numItems is -1, infinite list: nutze chunk-tracking
                                 if (tmpnr < 0) {
-                                    // Wir sind am Anfang der aktuellen Liste
-                                    let floorItemsMax = Math.floor(currentNavNumItemsMax / currentNavListChunk);
-                                    let floorItems = Math.floor(currentNavNumItems / currentNavListChunk);
-                                    let remainderItemsMax = currentNavNumItemsMax % currentNavListChunk;
-
-                                    if (floorItemsMax > 1) {
-                                        // Es gibt vorherige Items - lade vorherigen Chunk
-                                        const prevChunkStart =
-                                            remainderItemsMax > 0
-                                                ? (floorItemsMax - 1) * currentNavListChunk - 1
-                                                : (floorItemsMax - 2) * currentNavListChunk - 1;
+                                    // Wir sind vor dem ersten Item des aktuellen Chunks
+                                    if (currentNavChunkIndex > 0) {
+                                        // Es gibt einen vorherigen Chunk
+                                        const prevIndex = currentNavChunkIndex - 1;
+                                        const prevChunkId = currentNavChunks[prevIndex];
+                                        const startParam = prevChunkId === '-1' ? -1 : Number(prevChunkId);
                                         this.log.debug(
-                                            `Loading previous items for navigationDown from index ${prevChunkStart} floorItemsMax=${floorItemsMax} remainderItemsMax=${remainderItemsMax}`,
+                                            `Infinite list: loading previous chunk (from chunkIndex ${currentNavChunkIndex} -> ${prevIndex})`,
                                         );
-                                        await this.updateNavList(prevChunkStart);
-
-                                        // Reload object after updateNavList
-                                        /*
-                                            const updatedObj = await this.getObjectAsync('modes.currentNavKey');
-                                            if (updatedObj && updatedObj.native) {
-                                                const updatedKeys = Object.keys(updatedObj.common.states).map(k =>
-                                                    Number(k),
-                                                );
-                                                */
-                                        tmpnr = currentNavList.length - 1; // Bei neuem Chunk am Ende starten
-                                        nextKey = currentNavList[tmpnr].$.key;
-                                    } else if (floorItemsMax == 1) {
-                                        // Wir sind am Anfang des ersten Chunks, aber es gibt mehr Items insgesamt
-                                        // Springe zum Ende der Liste
-                                        const endChunkStart = Math.max(0, floorItems * currentNavListChunk - 1);
+                                        await this.updateNavList(startParam);
                                         this.log.debug(
-                                            `At beginning of first list, loading from end at index ${endChunkStart}`,
+                                            `After loading previous chunk: chunkIndex=${currentNavChunkIndex}, currentNavNumItemsMax=${currentNavNumItemsMax}, currentNavChunks=${JSON.stringify(currentNavChunks)}`,
                                         );
-                                        await this.updateNavList(endChunkStart);
-
-                                        // Reload object after updateNavList
-                                        /*
-                                            const updatedObj = await this.getObjectAsync('modes.currentNavKey');
-                                            if (updatedObj && updatedObj.native) {
-                                                const updatedKeys = Object.keys(updatedObj.common.states).map(k =>
-                                                    Number(k),
-                                                );
-                                                */
-
-                                        tmpnr = currentNavList.length - 1; // Bei neuem Chunk am Ende starten
+                                        tmpnr = currentNavList.length - 1;
                                         nextKey = currentNavList[tmpnr].$.key;
                                     } else {
-                                        // Nur ein Chunk insgesamt und wir sind am Anfang
-                                        // Gehe zum letzten Item dieses Chunks
-                                        this.log.debug('Single chunk list, jumping to last item');
-                                        tmpnr = currentNavList.length - 1;
-                                        if (tmpnr >= 0) {
-                                            nextKey = Number(currentNavList[tmpnr].$.key);
+                                        // Wir sind am Anfang (Chunk 0), gehe zum LETZTEN Chunk durch Wrapping
+                                        this.log.debug(
+                                            'Infinite list: at beginning of first chunk, wrapping to last chunk',
+                                        );
+                                        if (currentNavChunks.length > 0) {
+                                            const lastIdx = currentNavChunks.length - 1;
+                                            const lastChunkId = currentNavChunks[lastIdx];
+                                            const startParam = lastChunkId === '-1' ? -1 : Number(lastChunkId);
+                                            this.log.debug(
+                                                `Loading last chunk for wrap-around (chunkIndex ${lastIdx})`,
+                                            );
+                                            await this.updateNavList(startParam);
+                                            this.log.debug(
+                                                `After wrapping to last chunk: chunkIndex=${currentNavChunkIndex}, currentNavNumItemsMax=${currentNavNumItemsMax}`,
+                                            );
+                                            tmpnr = currentNavList.length - 1;
+                                            nextKey = currentNavList[tmpnr].$.key;
+                                        } else {
+                                            // Keine Chunks vorhanden, lade Chunk 0
+                                            this.log.debug('Infinite list: no chunks recorded, loading from start');
+                                            await this.updateNavList(-1);
+                                            this.log.debug(
+                                                `After loading from start: chunkIndex=${currentNavChunkIndex}, currentNavNumItemsMax=${currentNavNumItemsMax}`,
+                                            );
+                                            tmpnr = currentNavList.length - 1;
+                                            nextKey = currentNavList[tmpnr].$.key;
                                         }
                                     }
                                 } else {
-                                    // Wir sind nicht am Anfang, können normal einen Index nach unten gehen
                                     nextKey = currentNavList[tmpnr].$.key;
                                 }
                             }
@@ -861,7 +760,6 @@ class FrontierSilicon extends utils.Adapter {
                                     ack: true,
                                 });
                                 await adapter.setState(`modes.currentNavName`, { val: name, ack: true });
-                                // Aktualisiere das Objekt mit den neuen Werten
                                 currentNavIndex = tmpnr;
 
                                 const obj = await this.getObjectAsync('modes.currentNavKey');
@@ -881,6 +779,7 @@ class FrontierSilicon extends utils.Adapter {
                         } catch (err) {
                             this.log.debug(`Error in navigationDown: ${JSON.stringify(err)}`);
                         }
+                        // ...existing code...
                     } else if (zustand[3] === 'navigationSelect') {
                         try {
                             let currKey;
@@ -1406,74 +1305,168 @@ class FrontierSilicon extends utils.Adapter {
 
     async updateNavList(startItem) {
         try {
+            this.log.debug(`updateNavList called with startItem=${startItem}`);
             this.log.debug('Updating navigation list');
             await this.enableNavIfNeccessary();
             await this.sleep(1000);
+
             let response = await this.callAPI('netRemote.nav.numitems');
             if (response.success) {
                 currentNavNumItems = response.result.value[0].s32[0];
-                this.log.debug(`Number of items in current mode: ${response.result.value[0].s32[0]}`);
+                this.log.debug(`Number of items in current mode: ${currentNavNumItems}`);
             }
 
-            // Bestimme den Startpunkt für das Laden
+            // Parameterauswertung:
+            // - startItem === undefined  => vollständiger Reset (z.B. Mode-Wechsel), lade Chunk 0
+            // - startItem === -1         => explizit Chunk 0 laden OHNE Reset der Chunk-Tracking-Liste
+            // - startItem >= 0           => lade ab diesem Schlüssel (Chunk-StartKey)
             let startIndex = -1;
-            let newNavNumItemsMax = 0;
+            const explicitLoadZero = startItem === -1;
+            const fullReset = startItem === undefined;
 
-            if (startItem !== undefined && startItem !== null && startItem >= 0) {
-                // Neuer Chunk wird angefordert
+            if (fullReset) {
+                startIndex = -1; // Lade Chunk 0 für vollständigen Reset
+                currentNavChunks = [];
+                currentNavChunkIndex = 0;
+                this.log.debug('updateNavList: full reset of chunk tracking (loading chunk 0)');
+            } else if (explicitLoadZero) {
+                startIndex = -1; // load first page but keep currentNavChunks
+                this.log.debug('updateNavList: explicit load of chunk 0 (no reset)');
+            } else if (startItem !== undefined && startItem !== null && startItem >= 0) {
                 startIndex = startItem;
-                if (currentNavNumItems >= 0) {
-                    // normal list with numItems known - calculate new max
-                    newNavNumItemsMax = Math.floor((startItem + 1) / currentNavListChunk) * currentNavListChunk;
-                    this.log.debug(
-                        `Assuming normal list, startIndex=${startIndex}, newNavNumItemsMax=${newNavNumItemsMax}`,
-                    );
-                } else {
-                    // No numItems known - assume infinite list
-                    //newNavNumItemsMax = currentNavNumItemsMax;
-                    let indexOfKey = currentNavList.findIndex(item => item.$.key == startItem.toString()) + 1;
-                    newNavNumItemsMax = currentNavNumItemsMax + indexOfKey;
-                    this.log.debug(
-                        `Assuming infinite list, startIndex=${startIndex}, newNavNumItemsMax=${newNavNumItemsMax} indexOfKey=${indexOfKey}`,
-                    );
-                }
+                this.log.debug(`updateNavList: explicit startIndex=${startIndex}`);
             } else {
-                // Erstes Laden oder Reset
+                // fallback: treat as full reset
                 startIndex = -1;
-                newNavNumItemsMax = 0;
+                currentNavChunks = [];
+                currentNavChunkIndex = 0;
+                this.log.debug('updateNavList: fallback full reset');
             }
 
             this.log.debug(
-                `updateNavList: Loading from startIndex=${startIndex}, newNavNumItemsMax=${newNavNumItemsMax}`,
+                `updateNavList: Loading from startIndex=${startIndex} (explicitLoadZero=${explicitLoadZero}, fullReset=${fullReset})`,
             );
             response = await this.callAPI('netRemote.nav.list', '', startIndex, currentNavListChunk);
-            if (response.success) {
-                currentNavList = response.result.item;
-                this.log.debug(`Current List: ${JSON.stringify(currentNavList)} Length: ${currentNavList.length}`);
+            if (!response.success) {
+                this.log.debug('updateNavList: nav.list call failed');
+                return;
+            }
 
-                let allKeys = [];
-                let allNames = [];
-                let currentNavItems = {};
+            currentNavList = response.result.item || [];
+            this.log.debug(`Current List length: ${currentNavList.length}`);
 
-                currentNavList.forEach(item => {
-                    allKeys.push(item.$.key);
-                    allNames.push(item.field.find(f => f.$.name === 'name').c8_array[0].trim());
-                });
-                // Loop to insert key & value in modes object
-                for (let i = 0; i < allKeys.length; i++) {
-                    currentNavItems[i] = allNames[i];
+            // Build states mapping
+            const currentNavItems = {};
+            currentNavList.forEach((item, i) => {
+                const nameField = item.field.find(f => f.$.name === 'name');
+                currentNavItems[i] = nameField ? nameField.c8_array[0].trim() : '';
+            });
+
+            // Reset index into the chunk
+            currentNavIndex = 0;
+
+            if (currentNavNumItems < 0) {
+                // Bestimme Chunk-Identifikator
+                // - Chunk 0 wird IMMER mit "-1" identifiziert
+                // - Andere Chunks mit ihrem ERSTEN Key (als String)
+
+                let chunkIdentifier;
+                let isChunkZero = false;
+
+                if (startIndex === -1) {
+                    chunkIdentifier = '-1';
+                    isChunkZero = true;
+                } else if (startIndex >= 0) {
+                    chunkIdentifier = String(startIndex);
+                    isChunkZero = false;
+                } else if (currentNavList.length > 0) {
+                    chunkIdentifier = currentNavList[0].$.key.toString();
+                    isChunkZero = false;
+                } else {
+                    chunkIdentifier = '-1';
+                    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                    isChunkZero = true;
                 }
 
+                if (fullReset || currentNavChunks.length === 0) {
+                    currentNavChunks = [chunkIdentifier];
+                    currentNavChunkIndex = 0;
+                    this.log.debug(`Infinite: initialized with chunk 0, identifier=${chunkIdentifier}`);
+                } else if (explicitLoadZero) {
+                    // Chunk 0 muss immer auf Position 0 sein und mit "-1" identifiziert
+                    let foundIdx = currentNavChunks.findIndex(k => k === '-1' || k === chunkIdentifier);
+                    if (foundIdx === -1) {
+                        currentNavChunks.unshift('-1');
+                        currentNavChunkIndex = 0;
+                        this.log.debug(`Infinite: inserted chunk 0 with identifier "-1"`);
+                    } else if (foundIdx !== 0) {
+                        currentNavChunks.splice(foundIdx, 1);
+                        currentNavChunks.unshift('-1');
+                        currentNavChunkIndex = 0;
+                        this.log.debug(`Infinite: moved chunk 0 to position 0`);
+                    } else {
+                        currentNavChunkIndex = 0;
+                        this.log.debug(`Infinite: chunk 0 already at position 0`);
+                    }
+                } else {
+                    // Neuer Chunk wird hinzugefügt (nicht Chunk 0)
+                    // WICHTIG: Chunks werden in Ladreihenfolge gespeichert, NICHT sortiert!
+                    let idx = currentNavChunks.findIndex(k => k === chunkIdentifier);
+                    if (idx === -1) {
+                        // Neuer Chunk: einfach am Ende anhängen (Ladreihenfolge beibehalten)
+                        currentNavChunks.push(chunkIdentifier);
+                        idx = currentNavChunks.length - 1;
+                        this.log.debug(
+                            `Infinite: appended new chunk with identifier ${chunkIdentifier} at pos ${idx}, chunks now: ${JSON.stringify(currentNavChunks)}`,
+                        );
+                    } else {
+                        this.log.debug(
+                            `Infinite: found existing chunk with identifier ${chunkIdentifier} at pos ${idx}`,
+                        );
+                    }
+                    currentNavChunkIndex = idx;
+                    this.log.debug(`Infinite: set currentNavChunkIndex to ${idx} for identifier ${chunkIdentifier}`);
+                }
+
+                // currentNavNumItemsMax berechnen
+                if (currentNavList.length < currentNavListChunk) {
+                    // Aktueller Chunk ist unvollständig (letzter Chunk)
+                    currentNavNumItemsMax = currentNavChunkIndex * currentNavListChunk + currentNavList.length;
+                    this.log.debug(
+                        `Infinite: last incomplete chunk - chunkIndex=${currentNavChunkIndex}, itemsInThisChunk=${currentNavList.length}, currentNavNumItemsMax=${currentNavNumItemsMax}`,
+                    );
+                } else {
+                    // Aktueller Chunk ist vollständig
+                    // WICHTIG: currentNavNumItemsMax = Items bis zum AKTUELLEN Chunk + aktuelle Chunk-Items
+                    // NOT = Gesamtanzahl aller bekannten Chunks
+                    currentNavNumItemsMax = (currentNavChunkIndex + 1) * currentNavListChunk;
+                    this.log.debug(
+                        `Infinite: complete chunk - chunkIndex=${currentNavChunkIndex}, currentNavNumItemsMax=${currentNavNumItemsMax}`,
+                    );
+                }
                 this.log.debug(
-                    `Current nav items: ${JSON.stringify(currentNavItems)} allKeys: ${allKeys} allNames: ${allNames}`,
+                    `Infinite list: chunkIndex=${currentNavChunkIndex}, chunks=${JSON.stringify(currentNavChunks)}, currentNavNumItemsMax=${currentNavNumItemsMax}`,
                 );
+            } else {
+                // ...existing code...
+                // --- Finite list handling ---
+                if (startIndex >= 0) {
+                    // startIndex wurde als "letzter geladener Index" übergeben => +1 vor Chunk-Berechnung
+                    const chunkIndex = Math.max(0, Math.floor((startIndex + 1) / currentNavListChunk));
+                    currentNavNumItemsMax = Math.min((chunkIndex + 1) * currentNavListChunk, currentNavNumItems);
+                } else {
+                    // Initial load -> nur erster Chunk sichtbar
+                    currentNavNumItemsMax = Math.min(currentNavListChunk, currentNavNumItems);
+                }
+                this.log.debug(
+                    `Finite list: startIndex=${startIndex}, currentNavNumItems=${currentNavNumItems}, currentNavNumItemsMax=${currentNavNumItemsMax}`,
+                );
+            }
 
-                // Update navigation with new values
-                currentNavIndex = 0;
-                currentNavNumItemsMax = newNavNumItemsMax + currentNavList.length;
-                let key = currentNavList[currentNavIndex].$.key;
+            // extract first item meta
+            if (currentNavList.length > 0) {
+                const key = currentNavList[currentNavIndex].$.key;
                 let name = '';
-
                 currentNavList[currentNavIndex].field.forEach(f => {
                     switch (f.$.name) {
                         case 'name':
@@ -1489,27 +1482,14 @@ class FrontierSilicon extends utils.Adapter {
                             break;
                     }
                 });
+
                 this.log.debug(
-                    `updateNavList: Loaded from startIndex=${startIndex}, currentNavNumItemsMax=${currentNavNumItemsMax}`,
-                );
-                this.log.debug(
-                    `First item in current nav list: Key=${key}, Name=${name}, Type=${currentNavType}, Subtype=${currentNavSubtype}`,
+                    `updateNavList: Loaded from startIndex=${startIndex}, currentNavNumItemsMax=${currentNavNumItemsMax}, firstKey=${key}`,
                 );
 
-                await this.setState('modes.currentNavIndex', {
-                    val: Number(currentNavIndex),
-                    ack: true,
-                });
-
-                await this.setState('modes.currentNavKey', {
-                    val: Number(key),
-                    ack: true,
-                });
-
-                await this.setState('modes.currentNavName', {
-                    val: name,
-                    ack: true,
-                });
+                await this.setState('modes.currentNavIndex', { val: Number(currentNavIndex), ack: true });
+                await this.setState('modes.currentNavKey', { val: Number(key), ack: true });
+                await this.setState('modes.currentNavName', { val: name, ack: true });
 
                 // Aktualisiere das Objekt mit den neuen Werten
                 const obj = await this.getObjectAsync('modes.currentNavKey');
@@ -1522,6 +1502,8 @@ class FrontierSilicon extends utils.Adapter {
                     obj.native.currentNavSubtype.value = Number(currentNavSubtype);
                     await this.setObject('modes.currentNavKey', obj);
                 }
+            } else {
+                this.log.debug('updateNavList: currentNavList empty after nav.list call');
             }
         } catch (err) {
             this.log.debug(`Error in updateNavList: ${JSON.stringify(err)}`);
