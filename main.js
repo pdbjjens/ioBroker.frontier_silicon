@@ -29,9 +29,12 @@ let sessionRetryCnt = SESSION_RETRYS;
 let currentNavNumItems = 0;
 let currentNavNumItemsMax = 0;
 let currentNavIndex = 0;
+let currentNavKey = 0;
+let currentNavName = '';
 let currentNavType = 0;
 let currentNavSubtype = 0;
 let currentNavList = [];
+let currentNavListJson = [];
 const currentNavListChunk = 25;
 let allModes = {};
 let currentNavChunks = []; // neu: Liste von Chunk-Start-Keys (als Strings) für infinite Listen
@@ -588,14 +591,16 @@ class FrontierSilicon extends utils.Adapter {
                                 this.log.debug(`Next Item: Index=${tmpnr}, Key=${nextKey}, Name=${name}`);
                                 await adapter.setState('modes.currentNavIndex', { val: tmpnr, ack: true });
                                 await adapter.setState('modes.currentNavKey', {
-                                    val: Number(nextKey),
+                                    val: nextKey,
                                     ack: true,
                                 });
                                 await adapter.setState(`modes.currentNavName`, { val: name, ack: true });
 
                                 const obj = await this.getObjectAsync('modes.currentNavIndex');
                                 if (obj && obj.native) {
-                                    obj.native.currentNavIndex.value = Number(currentNavIndex);
+                                    obj.native.currentNavIndex.value = currentNavIndex;
+                                    obj.native.currentNavKey.value = currentNavKey;
+                                    obj.native.currentNavName.value = currentNavName;
                                     obj.native.currentNavType.value = Number(currentNavType);
                                     obj.native.currentNavSubtype.value = Number(currentNavSubtype);
                                     obj.native.currentNavNumItemsMax.value = Number(currentNavNumItemsMax);
@@ -718,12 +723,10 @@ class FrontierSilicon extends utils.Adapter {
                                 tmpnr < currentNavList.length &&
                                 currentNavNumItems !== 0
                             ) {
-                                let name = '';
-
                                 currentNavList[tmpnr].field.forEach(f => {
                                     switch (f.$.name) {
                                         case 'name':
-                                            name = f.c8_array[0];
+                                            currentNavName = f.c8_array[0];
                                             break;
                                         case 'type':
                                             currentNavType = f.u8[0];
@@ -736,20 +739,22 @@ class FrontierSilicon extends utils.Adapter {
                                     }
                                 });
 
-                                this.log.debug(`Previous Item: Index=${tmpnr}, Key=${nextKey}, Name=${name}`);
+                                this.log.debug(`Previous Item: Index=${tmpnr}, Key=${nextKey}, Name=${currentNavName}`);
                                 await adapter.setState('modes.currentNavIndex', { val: tmpnr, ack: true });
                                 await adapter.setState('modes.currentNavKey', {
-                                    val: Number(nextKey),
+                                    val: nextKey,
                                     ack: true,
                                 });
-                                await adapter.setState(`modes.currentNavName`, { val: name, ack: true });
+                                await adapter.setState(`modes.currentNavName`, { val: currentNavName, ack: true });
                                 currentNavIndex = tmpnr;
 
                                 const obj = await this.getObjectAsync('modes.currentNavIndex');
                                 if (obj && obj.native) {
-                                    obj.native.currentNavIndex.value = Number(tmpnr);
-                                    obj.native.currentNavType.value = Number(currentNavType);
-                                    obj.native.currentNavSubtype.value = Number(currentNavSubtype);
+                                    obj.native.currentNavIndex.value = tmpnr;
+                                    obj.native.currentNavKey.value = nextKey;
+                                    obj.native.currentNavName.value = currentNavName;
+                                    obj.native.currentNavType.value = currentNavType;
+                                    obj.native.currentNavSubtype.value = currentNavSubtype;
                                     await this.setObject('modes.currentNavIndex', obj);
                                 }
 
@@ -766,9 +771,9 @@ class FrontierSilicon extends utils.Adapter {
                     } else if (zustand[3] === 'navigationSelect') {
                         try {
                             let currKey;
-                            const currentKey = await adapter.getStateAsync('modes.currentNavKey');
-                            if (currentKey !== null && currentKey !== undefined && currentKey.val !== null) {
-                                currKey = Number(currentKey.val);
+                            const currenNavKey = await adapter.getStateAsync('modes.currentNavKey');
+                            if (currenNavKey !== null && currenNavKey !== undefined && currenNavKey.val !== null) {
+                                currKey = Number(currenNavKey.val);
                                 if (currentNavType == 0) {
                                     // directory
                                     await this.enableNavIfNeccessary();
@@ -1280,8 +1285,6 @@ class FrontierSilicon extends utils.Adapter {
     async updateNavList(startItem) {
         try {
             this.log.debug(`updateNavList called with startItem=${startItem}`);
-            let name = '';
-            let key;
             let currentNavItems = {};
 
             let answer = await this.waitForStatusReady();
@@ -1343,13 +1346,6 @@ class FrontierSilicon extends utils.Adapter {
                 this.log.debug(
                     `Current Nav List ${JSON.stringify(response.result.item)} length: ${currentNavList.length}`,
                 );
-
-                // Build states mapping
-                currentNavList.forEach((item, i) => {
-                    const nameField = item.field.find(f => f.$.name === 'name');
-                    currentNavItems[i] = nameField ? nameField.c8_array[0].trim() : '';
-                });
-
                 // Reset index into the chunk
                 currentNavIndex = 0;
 
@@ -1453,13 +1449,19 @@ class FrontierSilicon extends utils.Adapter {
                     );
                 }
 
+                // Build states mapping
+                currentNavList.forEach((item, i) => {
+                    const nameField = item.field.find(f => f.$.name === 'name');
+                    currentNavItems[i] = nameField ? nameField.c8_array[0].trim() : '';
+                });
+
                 // extract first item meta data for state updates
                 if (currentNavList.length > 0) {
-                    key = currentNavList[currentNavIndex].$.key;
+                    currentNavKey = currentNavList[currentNavIndex].$.key;
                     currentNavList[currentNavIndex].field.forEach(f => {
                         switch (f.$.name) {
                             case 'name':
-                                name = f.c8_array[0];
+                                currentNavName = f.c8_array[0];
                                 break;
                             case 'type':
                                 currentNavType = f.u8[0];
@@ -1471,11 +1473,77 @@ class FrontierSilicon extends utils.Adapter {
                                 break;
                         }
                     });
-
-                    this.log.debug(
-                        `updateNavList: Loaded from startIndex=${startIndex}, currentNavNumItemsMax=${currentNavNumItemsMax}, firstKey=${key}`,
-                    );
                 }
+                // Build currentNavList JSON mapping
+                this.log.debug(`Next States: ${JSON.stringify(currentNavList)}`);
+
+                if (currentNavList.length > 0) {
+                    let key = '';
+                    let name = '';
+                    let type = '';
+                    let subtype = '';
+                    let graphicURI = '';
+                    let artist = '';
+                    let contextmenu = '';
+                    let keyName = '';
+                    let keyType = '';
+                    let keySubtype = '';
+                    let keyGraphicURI = '';
+                    let keyArtist = '';
+                    let keyContextmenu = '';
+                    let keyKey = '';
+                    currentNavListJson = [];
+
+                    currentNavList.forEach(item => {
+                        key = item.$.key;
+                        keyKey = Object.keys(item.$)[0];
+                        item.field.forEach(f => {
+                            switch (f.$.name) {
+                                case 'name':
+                                    name = f.c8_array[0];
+                                    keyName = f.$.name;
+                                    break;
+                                case 'type':
+                                    type = f.u8[0];
+                                    keyType = f.$.name;
+                                    break;
+                                case 'subtype':
+                                    subtype = f.u8[0];
+                                    keySubtype = f.$.name;
+                                    break;
+                                case 'graphicuri':
+                                    graphicURI = f.c8_array[0];
+                                    keyGraphicURI = f.$.name;
+                                    break;
+                                case 'artist':
+                                    artist = f.c8_array[0];
+                                    keyArtist = f.$.name;
+                                    break;
+                                case 'contextmenu':
+                                    contextmenu = f.u8[0];
+                                    keyContextmenu = f.$.name;
+                                    break;
+
+                                default:
+                                    break;
+                            }
+                        });
+                        currentNavListJson.push({
+                            [keyKey]: key,
+                            [keyName]: name,
+                            [keyType]: type,
+                            [keySubtype]: subtype,
+                            [keyGraphicURI]: graphicURI,
+                            [keyArtist]: artist,
+                            [keyContextmenu]: contextmenu,
+                        });
+                    });
+                }
+                this.log.debug(`Next List: ${JSON.stringify(currentNavListJson)}`);
+
+                this.log.debug(
+                    `updateNavList: Loaded from startIndex=${startIndex}, currentNavNumItemsMax=${currentNavNumItemsMax}, firstKey=${currentNavKey}`,
+                );
             } else {
                 this.log.debug(`updateNavList: currentNavNumItems == 0, resetting navigation states`);
                 // Reset relevant states for empty list
@@ -1484,29 +1552,27 @@ class FrontierSilicon extends utils.Adapter {
                 currentNavType = 0;
                 currentNavSubtype = 0;
                 currentNavIndex = 0;
-                key = '0';
-                name = '';
+                currentNavKey = 0;
+                currentNavName = '';
                 currentNavItems[0] = 'No items';
                 currentNavList = [];
+                currentNavListJson = [];
             }
-            await this.setState('modes.currentNavIndex', { val: Number(currentNavIndex), ack: true });
-            await this.setState('modes.currentNavKey', { val: Number(key), ack: true });
-            await this.setState('modes.currentNavName', { val: name, ack: true });
+
+            await this.setState('modes.currentNavIndex', { val: currentNavIndex, ack: true });
+            await this.setState('modes.currentNavKey', { val: currentNavKey, ack: true });
+            await this.setState('modes.currentNavName', { val: currentNavName, ack: true });
+            await this.setState('modes.currentNavList', { val: JSON.stringify(currentNavListJson), ack: true });
 
             // Aktualisiere das Objekt mit den neuen Werten
             const obj = await this.getObjectAsync('modes.currentNavIndex');
             if (obj && obj.native) {
-                obj.native.currentNavNumItems.value = Number(currentNavNumItems);
-                obj.native.currentNavNumItemsMax.value = Number(currentNavNumItemsMax);
-                obj.native.currentNavIndex.value = Number(currentNavIndex);
+                obj.native.currentNavNumItems.value = currentNavNumItems;
+                obj.native.currentNavNumItemsMax.value = currentNavNumItemsMax;
+                obj.native.currentNavIndex.value = currentNavIndex;
                 obj.common.states = currentNavItems;
-                obj.native.currentNavType.value = Number(currentNavType);
-                obj.native.currentNavSubtype.value = Number(currentNavSubtype);
-                await this.setObject('modes.currentNavIndex', obj);
-            }
-            if (obj && obj.common.custom && obj.common.custom['iqontrol.0']) {
-                obj.common.custom['iqontrol.0'].states = currentNavItems;
-                obj.common.custom['iqontrol.0'].max = currentNavList.length - 1;
+                obj.native.currentNavType.value = currentNavType;
+                obj.native.currentNavSubtype.value = currentNavSubtype;
                 await this.setObject('modes.currentNavIndex', obj);
             }
         } catch (err) {
@@ -2031,6 +2097,18 @@ class FrontierSilicon extends utils.Adapter {
                     name: 'Navigation name',
                     type: 'string',
                     role: 'media.navigation.name',
+                    read: true,
+                    write: false,
+                },
+                native: {},
+            });
+
+            this.setObjectNotExistsAsync(`modes.currentNavList`, {
+                type: 'state',
+                common: {
+                    name: 'Navigation list',
+                    type: 'string',
+                    role: 'media.navigation.list',
                     read: true,
                     write: false,
                 },
