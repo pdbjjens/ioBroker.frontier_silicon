@@ -514,9 +514,9 @@ class FrontierSilicon extends utils.Adapter {
                                         await this.updateNavList();
                                     }
                                     tmpnr = 0; // Bei neuem Chunk immer bei Index 0 starten
-                                    nextKey = currentNavList[tmpnr].$.key;
+                                    nextKey = Number(currentNavList[tmpnr].$.key);
                                 } else {
-                                    nextKey = currentNavList[tmpnr].$.key;
+                                    nextKey = Number(currentNavList[tmpnr].$.key);
                                 }
                             } else if (currentNavNumItems === -1) {
                                 // infinite Liste: Chunk-Tracking korrekt nutzen und Wrap-Logik
@@ -556,9 +556,11 @@ class FrontierSilicon extends utils.Adapter {
                                     }
 
                                     tmpnr = 0;
-                                    nextKey = currentNavList[tmpnr] ? currentNavList[tmpnr].$.key : undefined;
+                                    nextKey = currentNavList[tmpnr]
+                                        ? Number(currentNavList[tmpnr].$.key)
+                                        : Number(undefined);
                                 } else {
-                                    nextKey = currentNavList[tmpnr].$.key;
+                                    nextKey = Number(currentNavList[tmpnr].$.key);
                                 }
                             }
 
@@ -569,18 +571,18 @@ class FrontierSilicon extends utils.Adapter {
                                 tmpnr < currentNavList.length &&
                                 currentNavNumItems !== 0
                             ) {
-                                let name = '';
+                                //let name = '';
 
                                 currentNavList[tmpnr].field.forEach(f => {
                                     switch (f.$.name) {
                                         case 'name':
-                                            name = f.c8_array[0];
+                                            currentNavName = f.c8_array[0];
                                             break;
                                         case 'type':
-                                            currentNavType = f.u8[0];
+                                            currentNavType = Number(f.u8[0]);
                                             break;
                                         case 'subtype':
-                                            currentNavSubtype = f.u8[0];
+                                            currentNavSubtype = Number(f.u8[0]);
                                             break;
                                         default:
                                             break;
@@ -588,22 +590,27 @@ class FrontierSilicon extends utils.Adapter {
                                 });
 
                                 currentNavIndex = tmpnr;
-                                this.log.debug(`Next Item: Index=${tmpnr}, Key=${nextKey}, Name=${name}`);
-                                await adapter.setState('modes.currentNavIndex', { val: tmpnr, ack: true });
+                                this.log.debug(
+                                    `NavigationUp: Next Item: Index=${currentNavIndex}, Key=${nextKey}, Name=${currentNavName}`,
+                                );
+                                await adapter.setState('modes.currentNavIndex', {
+                                    val: currentNavIndex,
+                                    ack: true,
+                                });
                                 await adapter.setState('modes.currentNavKey', {
                                     val: nextKey,
                                     ack: true,
                                 });
-                                await adapter.setState(`modes.currentNavName`, { val: name, ack: true });
+                                await adapter.setState(`modes.currentNavName`, { val: currentNavName, ack: true });
 
                                 const obj = await this.getObjectAsync('modes.currentNavIndex');
                                 if (obj && obj.native) {
                                     obj.native.currentNavIndex.value = currentNavIndex;
-                                    obj.native.currentNavKey.value = currentNavKey;
+                                    obj.native.currentNavKey.value = nextKey;
                                     obj.native.currentNavName.value = currentNavName;
-                                    obj.native.currentNavType.value = Number(currentNavType);
-                                    obj.native.currentNavSubtype.value = Number(currentNavSubtype);
-                                    obj.native.currentNavNumItemsMax.value = Number(currentNavNumItemsMax);
+                                    obj.native.currentNavType.value = currentNavType;
+                                    obj.native.currentNavSubtype.value = currentNavSubtype;
+                                    obj.native.currentNavNumItemsMax.value = currentNavNumItemsMax;
                                     await this.setObject('modes.currentNavIndex', obj);
                                 }
 
@@ -645,7 +652,7 @@ class FrontierSilicon extends utils.Adapter {
                                         await this.updateNavList(prevChunkStart);
 
                                         tmpnr = currentNavList.length - 1;
-                                        nextKey = currentNavList[tmpnr].$.key;
+                                        nextKey = Number(currentNavList[tmpnr].$.key);
                                     } else if (floorItemsMax == 1) {
                                         const endChunkStart = Math.max(0, floorItems * currentNavListChunk - 1);
                                         this.log.debug(
@@ -653,7 +660,7 @@ class FrontierSilicon extends utils.Adapter {
                                         );
                                         await this.updateNavList(endChunkStart);
                                         tmpnr = currentNavList.length - 1;
-                                        nextKey = currentNavList[tmpnr].$.key;
+                                        nextKey = Number(currentNavList[tmpnr].$.key);
                                     } else {
                                         this.log.debug('Single chunk list, jumping to last item');
                                         tmpnr = currentNavList.length - 1;
@@ -662,7 +669,7 @@ class FrontierSilicon extends utils.Adapter {
                                         }
                                     }
                                 } else {
-                                    nextKey = currentNavList[tmpnr].$.key;
+                                    nextKey = Number(currentNavList[tmpnr].$.key);
                                 }
                             } else if (currentNavNumItems === -1) {
                                 // numItems is -1, infinite list: nutze chunk-tracking
@@ -681,7 +688,7 @@ class FrontierSilicon extends utils.Adapter {
                                             `After loading previous chunk: chunkIndex=${currentNavChunkIndex}, currentNavNumItemsMax=${currentNavNumItemsMax}, currentNavChunks=${JSON.stringify(currentNavChunks)}`,
                                         );
                                         tmpnr = currentNavList.length - 1;
-                                        nextKey = currentNavList[tmpnr].$.key;
+                                        nextKey = Number(currentNavList[tmpnr].$.key);
                                     } else {
                                         // Wir sind am Anfang (Chunk 0), gehe zum LETZTEN Chunk durch Wrapping
                                         this.log.debug(
@@ -699,7 +706,7 @@ class FrontierSilicon extends utils.Adapter {
                                                 `After wrapping to last chunk: chunkIndex=${currentNavChunkIndex}, currentNavNumItemsMax=${currentNavNumItemsMax}`,
                                             );
                                             tmpnr = currentNavList.length - 1;
-                                            nextKey = currentNavList[tmpnr].$.key;
+                                            nextKey = Number(currentNavList[tmpnr].$.key);
                                         } else {
                                             // Keine Chunks vorhanden, lade Chunk 0
                                             this.log.debug('Infinite list: no chunks recorded, loading from start');
@@ -708,11 +715,11 @@ class FrontierSilicon extends utils.Adapter {
                                                 `After loading from start: chunkIndex=${currentNavChunkIndex}, currentNavNumItemsMax=${currentNavNumItemsMax}`,
                                             );
                                             tmpnr = currentNavList.length - 1;
-                                            nextKey = currentNavList[tmpnr].$.key;
+                                            nextKey = Number(currentNavList[tmpnr].$.key);
                                         }
                                     }
                                 } else {
-                                    nextKey = currentNavList[tmpnr].$.key;
+                                    nextKey = Number(currentNavList[tmpnr].$.key);
                                 }
                             }
 
@@ -729,28 +736,30 @@ class FrontierSilicon extends utils.Adapter {
                                             currentNavName = f.c8_array[0];
                                             break;
                                         case 'type':
-                                            currentNavType = f.u8[0];
+                                            currentNavType = Number(f.u8[0]);
                                             break;
                                         case 'subtype':
-                                            currentNavSubtype = f.u8[0];
+                                            currentNavSubtype = Number(f.u8[0]);
                                             break;
                                         default:
                                             break;
                                     }
                                 });
+                                currentNavIndex = tmpnr;
 
-                                this.log.debug(`Previous Item: Index=${tmpnr}, Key=${nextKey}, Name=${currentNavName}`);
-                                await adapter.setState('modes.currentNavIndex', { val: tmpnr, ack: true });
+                                this.log.debug(
+                                    `Previous Item: Index=${currentNavIndex}, Key=${nextKey}, Name=${currentNavName}`,
+                                );
+                                await adapter.setState('modes.currentNavIndex', { val: currentNavIndex, ack: true });
                                 await adapter.setState('modes.currentNavKey', {
                                     val: nextKey,
                                     ack: true,
                                 });
                                 await adapter.setState(`modes.currentNavName`, { val: currentNavName, ack: true });
-                                currentNavIndex = tmpnr;
 
                                 const obj = await this.getObjectAsync('modes.currentNavIndex');
                                 if (obj && obj.native) {
-                                    obj.native.currentNavIndex.value = tmpnr;
+                                    obj.native.currentNavIndex.value = currentNavIndex;
                                     obj.native.currentNavKey.value = nextKey;
                                     obj.native.currentNavName.value = currentNavName;
                                     obj.native.currentNavType.value = currentNavType;
@@ -1457,17 +1466,17 @@ class FrontierSilicon extends utils.Adapter {
 
                 // extract first item meta data for state updates
                 if (currentNavList.length > 0) {
-                    currentNavKey = currentNavList[currentNavIndex].$.key;
+                    currentNavKey = Number(currentNavList[currentNavIndex].$.key);
                     currentNavList[currentNavIndex].field.forEach(f => {
                         switch (f.$.name) {
                             case 'name':
                                 currentNavName = f.c8_array[0];
                                 break;
                             case 'type':
-                                currentNavType = f.u8[0];
+                                currentNavType = Number(f.u8[0]);
                                 break;
                             case 'subtype':
-                                currentNavSubtype = f.u8[0];
+                                currentNavSubtype = Number(f.u8[0]);
                                 break;
                             default:
                                 break;
@@ -1569,6 +1578,8 @@ class FrontierSilicon extends utils.Adapter {
             if (obj && obj.native) {
                 obj.native.currentNavNumItems.value = currentNavNumItems;
                 obj.native.currentNavNumItemsMax.value = currentNavNumItemsMax;
+                obj.native.currentNavKey.value = currentNavKey;
+                obj.native.currentNavName.value = currentNavName;
                 obj.native.currentNavIndex.value = currentNavIndex;
                 obj.common.states = currentNavItems;
                 obj.native.currentNavType.value = currentNavType;
@@ -2048,6 +2059,12 @@ class FrontierSilicon extends utils.Adapter {
                     },
                     currentNavIndex: {
                         value: 'number',
+                    },
+                    currentNavKey: {
+                        value: 'number',
+                    },
+                    currentNavName: {
+                        value: 'string',
                     },
                     currentNavType: {
                         value: 'number',
@@ -3038,13 +3055,24 @@ class FrontierSilicon extends utils.Adapter {
         try {
             if (!name) {
                 this.log.debug('UpdateNavigation: Name is undefined or empty.');
-                return;
+                throw new Error('UpdateNavigation: Name is undefined or empty.');
+                //return;
+            }
+            if (currentNavNumItems === -1 || currentNavList.length === 0) {
+                this.log.debug('UpdateNavigation: Navigation list is empty or infinite.');
+                throw new Error('UpdateNavigation: Navigation list is empty or infinite.');
+                //return;
             }
             let navFound = false;
-            let navKey = '';
+            let navKey = 0;
 
+            //            do {
+            //Search name in current navigation list chunk
             for (const item of currentNavList) {
                 let navName = '';
+                const nameField = item.field.find(f => f.$.name === 'name');
+                navName = nameField.c8_array[0].trim();
+                /*
                 item.field.forEach(f => {
                     switch (f.$.name) {
                         case 'name':
@@ -3054,25 +3082,48 @@ class FrontierSilicon extends utils.Adapter {
                             break;
                     }
                 });
+                */
                 if (navName === name) {
                     this.log.debug(
                         `UpdateNavigation: Found matching navigation item "${name}" with key ${item.$.key}.`,
                     );
                     navFound = true;
-                    navKey = item.$.key;
+                    navKey = Number(item.$.key);
+                    // check if playable item is within current chunk, if not fetch next or previous chunk accordingly and continue searching
                     break;
                 }
             }
+            /*
+            if (!navFound) {
+                if (currentNavIndex >= currentNavList.length - 1 && !navFound) {
+                    this.log.debug(
+                        `Upper end of current navigation list chunk reached without finding a match, fetching next chunk...`,
+                        // navigateUp
+                    );
+                    await this.setState('modes.navigationUp', { val: true, ack: true });
+                } else if (currentNavIndex <= 0 && !navFound) {
+                    this.log.debug(
+                        `Lower end of current navigation list chunk reached without finding a match, fetching previous chunk...`,
+                        // navigateDown
+                    );
+                    await this.setState('modes.navigationDown', { val: true, ack: true });
+                }
+            }
+            //            } while (!navFound); // continue searching if list is chunked and end of current chunk is reached
+            */
             if (navFound) {
                 await this.setState('modes.currentNavIndex', {
-                    val: Number(navKey) >= currentNavListChunk ? Number(navKey) % currentNavListChunk : Number(navKey),
+                    val: navKey >= currentNavListChunk ? navKey % currentNavListChunk : navKey,
                     ack: true,
                 });
-                await this.setState('modes.currentNavKey', { val: Number(navKey), ack: true });
+                await this.setState('modes.currentNavKey', { val: navKey, ack: true });
                 await this.setState(`modes.currentNavName`, { val: name, ack: true });
+            } else {
+                //this.log.debug(`UpdateNavigation: No matching navigation item found for name "${name}".`);
+                throw new Error(`UpdateNavigation: No matching navigation item found for name "${name}".`);
             }
         } catch (error) {
-            this.log.error(`UpdateNavigation error: ${String(error)}`);
+            this.log.debug(`${String(error)}`);
         }
     }
 
